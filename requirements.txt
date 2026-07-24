@@ -1,0 +1,12 @@
+ipython==8.26.0
+jupyterlab==4.2.5
+numpy==2.2.6
+
+# airborne_survey_flight_path.ipynb
+tkinter==8.6
+shapely==2.1.2
+folium==0.20.0
+
+# SendToForeFlight.ipynb
+pandas==2.2.2
+qrcode==8.2

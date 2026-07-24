@@ -1,3 +1,12 @@
+# Risaku Specific for this project
+*.csv
+*.pptx
+*.html
+*.png
+*.xlsx
+.vscode/
+*.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
