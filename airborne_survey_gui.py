@@ -116,8 +116,10 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
         coords = list(segment.coords)
         if idx % 2 == 1:
             coords = coords[::-1]
-        if pattern_points and pattern_points[-1] != coords[0]:
-            pattern_points.append(coords[0])
+        # The turn onto the next pass is implicit in the polyline; only guard against
+        # emitting a duplicate point (which would create a zero-length segment).
+        if pattern_points and pattern_points[-1] == coords[0]:
+            coords = coords[1:]
         pattern_points.extend(coords)
 
     pattern_line = LineString(pattern_points)
