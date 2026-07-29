@@ -6,11 +6,12 @@ A small GUI toolset to generate airborne survey flight paths and export waypoint
 - Interactive Tkinter GUI to define survey boundary points and flight parameters
 - Generates an optimized rectangular survey pattern based on swath width, overlap, heading, and margins
 - Exports two CSV formats: ForeFlight-friendly and Honeywell-friendly
-- Saves an interactive Folium HTML map of the flight path
+- Draws a scaled flight-path preview directly in the window (native Tk canvas — no browser engine needed)
+- Saves an interactive Folium HTML map, opened on demand via **Open Interactive Map in Browser**
 - `airborne_survey_gui2.py` additionally generates a ForeFlight QR link for iPad transfer
 
 ## Files of interest
-- `airborne_survey_gui.py` — main GUI (map embedded in window, uses `tkinterweb`)
+- `airborne_survey_gui.py` — main GUI (scaled path preview drawn in-window; Folium map opens in a browser)
 - `airborne_survey_gui2.py` — GUI with QR code and separate HTML map backup
 - `requirements.txt` — pinned dependencies used by notebooks and scripts
 
@@ -26,8 +27,7 @@ The primary Python dependencies (also listed in `requirements.txt`) include:
 Additional packages required by the GUIs but not always present in `requirements.txt`:
 
 - pyproj
-- Pillow (PIL)
-- tkinterweb (for embedded HTML rendering in `airborne_survey_gui.py`)
+- Pillow (PIL) — only needed by the QR-code variant
 
 On macOS, `tkinter` is usually provided by the system Python. If using Conda, install `tk` via Conda or ensure the selected Python includes Tk support.
 
@@ -44,7 +44,7 @@ conda activate flightplan
 ```bash
 pip install -r requirements.txt
 # install missing extras
-pip install pyproj Pillow tkinterweb
+pip install pyproj Pillow
 ```
 
 If you prefer `pipenv` or `venv`, create an environment and use the same `pip install` commands.
@@ -63,12 +63,14 @@ Outputs created in the current working directory:
 
 - `<AREA>_waypoints_foreflight.csv` — ForeFlight importable CSV
 - `<AREA>_waypoints_honeywell.csv` — Honeywell FMS formatted CSV
-- `<AREA>_flight_path.html` or `temp_survey_map.html` — Folium map backup / preview
+- `<AREA>_flight_path.html` — Folium map (open with the button, or double-click the file)
 
 ## Notes & Tips
 - Ensure the waypoint prefix is exactly 3 characters (the GUI enforces this).
 - Provide at least 3 boundary points to define the survey polygon.
-- If `tkinterweb` fails to render the embedded map, open the generated HTML file in a browser.
+- The GUI runs one calculation at startup, so the preview and CSVs already exist before you
+  click anything. The status line under the button stamps each run so repeat clicks are visible.
+- Tile-backed maps need real JavaScript; use **Open Interactive Map in Browser** for that view.
 - The QR workflow embeds a `foreflightmobile://` link which opens ForeFlight on an iPad when scanned.
 
 ## Example

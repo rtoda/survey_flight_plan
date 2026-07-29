@@ -13,5 +13,8 @@ pandas>=2.2.2
 qrcode>=8.2
 
 pyproj>=3.7.2
-tkinterweb>=4.25.3
+# tkinterweb was used to embed the Folium map in airborne_survey_gui.py, but its
+# Tkhtml engine cannot execute Leaflet's JavaScript so the pane always rendered
+# blank. The GUI now draws a native Tk canvas preview and opens the Folium map in
+# the system browser instead, so no HTML widget is required.
 
