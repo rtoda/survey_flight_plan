@@ -21,16 +21,48 @@ exports waypoints for ForeFlight and a Honeywell FMS.
 
 ## Export invariants
 
-`calculate_and_render` writes six files. Two are load-bearing contracts:
+Everything for a run lands in `./<AREA>/`, including `<AREA>_area.json` so the folder is
+self-describing and reloadable.
 
-- The Honeywell CSV and the legacy `<AREA>_waypoints_foreflight.csv` are **byte-frozen**.
-  They have been verified byte-identical to the original pre-refactor output through every
-  change so far — diff them against a baseline after touching geometry or export code.
 - `navdata/user_waypoints.csv` inside the content pack **must keep that exact filename**;
   ForeFlight will not recognise it otherwise, and it fails silently rather than erroring.
+- `build_survey_kml` must emit only elements from ForeFlight's documented subset. A test
+  asserts this — check any new KML element against the list in foreflight.md first.
+- The waypoint CSVs were byte-frozen against the original pre-refactor output up until the
+  margin fix, which **deliberately moved every waypoint** (see below). The old coordinates
+  are no longer the reference; regenerate a baseline before the next geometry change.
 
-`build_survey_kml` must emit only elements from ForeFlight's documented subset. A test
-asserts this — if you add a KML element, check it against the list in foreflight.md first.
+## Coverage geometry — the margin fix
+
+`perimeter_margin_km` used to be unreliable and heading-dependent. Two causes, both fixed:
+
+1. **Pivot mismatch.** The polygon was rotated about *its own* centroid but the bounding
+   rectangle was rotated back about *the rectangle's* centroid — points up to ~0.6 km apart
+   on the default area. That translated the whole coverage region, so the effective margin
+   varied with heading (measured 3.94 km min against a 5.00 km request; heading 090 was the
+   only value that looked correct, because there the rotation angle is zero). All rotations
+   in `build_rectangular_pattern` now share one explicit `pivot`. **Do not reintroduce
+   `origin='centroid'` there** — it re-evaluates per geometry, which is the bug.
+2. **Box clipping.** Passes were clipped to the rotated bounding box, which overshoots the
+   target badly on some sides (measured 1.46× the buffered area). They are now clipped to
+   `target_poly.buffer(margin)` itself, so the padding holds on every side at every heading.
+   `buffer()` is called with `quad_segs=64` because the default 8 inscribes the arc and
+   lands ~10 m *inside* the requested margin.
+
+Consequences to keep in mind:
+
+- Coverage is now 1.00× the buffered target and the default plan is **26.9 nm instead of
+  44.0 nm** — same coverage, a third less flying. Waypoint coordinates changed accordingly.
+- The returned first value is now the **buffered coverage polygon**, not a rectangle, so it
+  has hundreds of vertices (261 on the default area). Display code must not assume 5.
+- A concave boundary can split a pass row into several segments, so rows are grouped and
+  sequenced per row rather than by sorting a flat segment list.
+- `measure_clearance()` samples the target outline and reports the padding actually
+  achieved; the summary panel and status line show it and flag a shortfall. Trust that
+  number over the requested value.
+- Lat/lon offsets shift the coverage region and therefore eat margin on the trailing side.
+  The lat offset default was changed from `0.025` to `0.0` so the request holds by default;
+  a nonzero offset is reported as SHORT rather than silently accepted.
 
 ## Environment
 

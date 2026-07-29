@@ -12,7 +12,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import numpy as np
 from shapely.geometry import LineString, Polygon, MultiLineString, GeometryCollection
 from shapely import affinity
@@ -48,39 +48,81 @@ def summarize_segment_travel(flight_pattern, groundspeed_kt=200.0):
     total_time_min = (total_distance_nm / groundspeed_kt) * 60.0 if groundspeed_kt > 0 else float('nan')
     return segment_summaries, total_distance_m, total_distance_nm, total_time_min
 
+def flatten_linestrings(geom):
+    """Every non-degenerate LineString inside an arbitrary intersection result."""
+    if isinstance(geom, LineString):
+        return [geom] if geom.length > 0 else []
+    if isinstance(geom, (MultiLineString, GeometryCollection)):
+        found = []
+        for part in geom.geoms:
+            found.extend(flatten_linestrings(part))
+        return found
+    return []
+
+
+def measure_clearance(target_poly, coverage_poly, samples=400):
+    """Smallest padding between the target outline and the coverage edge, in metres.
+
+    Negative means part of the target is not covered at all. Sampled around the target
+    exterior rather than taken vertex-to-vertex, so a long edge bowing outside the
+    coverage is still caught.
+    """
+    exterior = target_poly.exterior
+    worst = None
+    for i in range(samples):
+        point = exterior.interpolate(i / samples, normalized=True)
+        gap = coverage_poly.exterior.distance(point)
+        if not coverage_poly.contains(point):
+            gap = -gap
+        worst = gap if worst is None else min(worst, gap)
+    return 0.0 if worst is None else worst
+
+
 def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat):
     if len(latlon_coords) < 3:
         raise ValueError('At least three coordinates are required to define a survey area.')
 
     # Convert coordinates to UTM (metric) projection
     input_xy = [transformer_to_m.transform(lon, lat) for lat, lon, _ in latlon_coords]
-    survey_poly = Polygon(input_xy).buffer(0)
+    target_poly = Polygon(input_xy).buffer(0)
 
-    if survey_poly.is_empty or survey_poly.area == 0:
+    if target_poly.is_empty or target_poly.area == 0:
         raise ValueError('Survey polygon area is zero. Check input coordinates.')
 
+    # Pad the target itself and fly to that shape. Buffering grows the outline by the
+    # margin in every direction, so clipping the passes against it guarantees the
+    # requested padding on all sides at any heading. Clipping against the bounding box
+    # instead could not: the box overshoots wildly on some sides while the rotate-back
+    # step below used to shave the margin on others.
+    coverage = target_poly
     if perimeter_margin_km > 0:
-        survey_poly = survey_poly.buffer(perimeter_margin_km * 1000.0)
-
-    # Rotate survey polygon so requested heading becomes horizontal
-    heading_angle_deg = (90.0 - initial_heading_deg) % 360.0
-    rotated_poly = affinity.rotate(survey_poly, -heading_angle_deg, origin='centroid', use_radians=False)
-    minx, miny, maxx, maxy = rotated_poly.bounds
-    rect_coords = [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy), (minx, miny)]
-    survey_rect = Polygon(rect_coords)
-    survey_rect = affinity.rotate(survey_rect, heading_angle_deg, origin='centroid', use_radians=False)
+        # quad_segs well above the default 8: buffer() approximates the rounded corners
+        # with straight segments and the result is inscribed, so a coarse approximation
+        # lands slightly INSIDE the requested margin (~10 m short at 5 km with the
+        # default). Padding must never come out under what was asked for.
+        coverage = coverage.buffer(perimeter_margin_km * 1000.0, quad_segs=64)
 
     if lat_offset != 0.0 or lon_offset != 0.0:
         lat_offset_m = lat_offset * 111320.0
         lon_offset_m = lon_offset * 111320.0 * math.cos(math.radians(center_lat))
-        survey_rect = affinity.translate(survey_rect, xoff=lon_offset_m, yoff=lat_offset_m)
+        coverage = affinity.translate(coverage, xoff=lon_offset_m, yoff=lat_offset_m)
 
-    rotated_rect = affinity.rotate(survey_rect, -heading_angle_deg, origin='centroid', use_radians=False)
-    minx, miny, maxx, maxy = rotated_rect.bounds
+    # ONE pivot for every rotation in this function. The previous code rotated the
+    # polygon about the polygon's centroid but rotated the result back about the
+    # bounding rectangle's own centroid -- a different point, up to ~0.6 km away on the
+    # default area -- which translated the whole coverage region and made the effective
+    # margin depend on heading. Heading 090 was the only value that appeared to work,
+    # because that is the one case where the rotation angle is zero.
+    heading_angle_deg = (90.0 - initial_heading_deg) % 360.0
+    pivot = coverage.centroid
+    rotated_coverage = affinity.rotate(coverage, -heading_angle_deg, origin=pivot, use_radians=False)
+    minx, miny, maxx, maxy = rotated_coverage.bounds
+
     center_y = (miny + maxy) / 2.0
     line_spacing = swath_km * 1000 * (1 - overlap)
+    if line_spacing <= 0:
+        raise ValueError('Swath width and overlap give a zero or negative line spacing.')
 
-    pass_segments = []
     height = maxy - miny
     if height <= line_spacing:
         candidate_ys = [center_y]
@@ -89,50 +131,40 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
         start_y = center_y - ((num_lines - 1) * line_spacing / 2.0)
         candidate_ys = [start_y + i * line_spacing for i in range(num_lines)]
 
+    # One row per pass line. A concave coverage shape can split a row into several
+    # segments, so rows are kept grouped and ordered along the row before sequencing.
+    pass_rows = []
     for current_y in candidate_ys:
         pass_line = LineString([(minx - 10000, current_y), (maxx + 10000, current_y)])
-        clipped = pass_line.intersection(rotated_rect)
+        segments = flatten_linestrings(pass_line.intersection(rotated_coverage))
+        if segments:
+            pass_rows.append(sorted(segments, key=lambda s: s.centroid.x))
 
-        if clipped.is_empty or getattr(clipped, 'geom_type', None) not in {'LineString', 'MultiLineString', 'GeometryCollection'}:
-            continue
-
-        if isinstance(clipped, LineString):
-            if clipped.length > 0:
-                pass_segments.append(clipped)
-        elif isinstance(clipped, MultiLineString):
-            pass_segments.extend([seg for seg in clipped.geoms if seg.length > 0])
-        elif isinstance(clipped, GeometryCollection):
-            for part in clipped.geoms:
-                if isinstance(part, LineString) and part.length > 0:
-                    pass_segments.append(part)
-
-    if not pass_segments:
-        center_y = (miny + maxy) / 2.0
-        pass_line = LineString([(minx - 10000, center_y), (maxx + 10000, center_y)])
-        clipped = pass_line.intersection(rotated_rect)
-        if isinstance(clipped, LineString) and clipped.length > 0:
-            pass_segments.append(clipped)
-        elif isinstance(clipped, MultiLineString):
-            pass_segments.extend([seg for seg in clipped.geoms if seg.length > 0])
-
-    if not pass_segments:
+    if not pass_rows:
         raise ValueError('No pass segments could be generated. Adjust coordinates or swath width.')
 
-    pass_segments = sorted(pass_segments, key=lambda s: s.centroid.y)
     pattern_points = []
-    for idx, segment in enumerate(pass_segments):
-        coords = list(segment.coords)
-        if idx % 2 == 1:
-            coords = coords[::-1]
-        # The turn onto the next pass is implicit in the polyline; only guard against
-        # emitting a duplicate point (which would create a zero-length segment).
-        if pattern_points and pattern_points[-1] == coords[0]:
-            coords = coords[1:]
-        pattern_points.extend(coords)
+    pass_segments = []
+    for row_idx, row_segments in enumerate(pass_rows):
+        reverse = row_idx % 2 == 1
+        ordered = list(reversed(row_segments)) if reverse else row_segments
+        for segment in ordered:
+            coords = sorted(segment.coords, key=lambda c: c[0])
+            if reverse:
+                coords = coords[::-1]
+            # The turn onto the next pass is implicit in the polyline; only guard against
+            # emitting a duplicate point (which would create a zero-length segment).
+            if pattern_points and pattern_points[-1] == coords[0]:
+                coords = coords[1:]
+            pattern_points.extend(coords)
+            pass_segments.append(segment)
+
+    if len(pattern_points) < 2:
+        raise ValueError('Survey area is too small for the configured swath width.')
 
     pattern_line = LineString(pattern_points)
-    rotated_pattern = affinity.rotate(pattern_line, heading_angle_deg, origin='centroid', use_radians=False)
-    return survey_rect, rotated_pattern, pass_segments
+    rotated_pattern = affinity.rotate(pattern_line, heading_angle_deg, origin=pivot, use_radians=False)
+    return coverage, rotated_pattern, pass_segments
 
 # --- FOREFLIGHT KML / CONTENT PACK EXPORT ---
 #
@@ -253,6 +285,7 @@ class FlightPlannerGUI(tk.Tk):
         # plus the path of the last saved Folium map for the "open in browser" button.
         self._preview = None
         self._map_path = None
+        self._output_dir = None
         self._run_count = 0
 
         # Measured when labelling so a white backing box can be sized to the text.
@@ -314,7 +347,10 @@ class FlightPlannerGUI(tk.Tk):
             ("Swath Overlap (0.0-1.0):", "swath_overlap", "0.1"),
             ("Perimeter Margin (km):", "perimeter_margin_km", "5.0"),
             ("Initial Heading (deg True):", "initial_heading_deg", "20"),
-            ("Latitude Offset (deg):", "lat_offset", "0.025"),
+            # Offsets shift the whole coverage area, which eats into the perimeter margin
+            # on the trailing side. Default to no shift so the requested padding actually
+            # holds on all sides; the summary panel reports the padding achieved.
+            ("Latitude Offset (deg):", "lat_offset", "0.0"),
             ("Longitude Offset (deg):", "lon_offset", "0.0")
         ]
 
@@ -351,6 +387,12 @@ class FlightPlannerGUI(tk.Tk):
         # Clear Coordinates Button
         clear_btn = ttk.Button(coords_tab, text="Clear All GPS Fields", command=self._clear_gps_fields)
         clear_btn.grid(row=12, column=1, columnspan=3, pady=5, sticky="ew")
+
+        # Save/Load so a set of points never has to be retyped
+        area_btns = ttk.Frame(coords_tab)
+        area_btns.grid(row=13, column=0, columnspan=4, pady=(8, 0), sticky="ew")
+        ttk.Button(area_btns, text="Save Area…", command=self._save_area).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Button(area_btns, text="Load Area…", command=self._load_area).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 0))
 
         # --- RUN CONTROL BUTTON ---
         calculate_btn = ttk.Button(left_frame, text="Generate Flight Plan & Update Map", command=self.calculate_and_render)
@@ -561,6 +603,88 @@ class FlightPlannerGUI(tk.Tk):
             lon.delete(0, tk.END)
             lbl.delete(0, tk.END)
 
+    # --- AREA DEFINITION SAVE / LOAD -------------------------------------------------
+
+    AREA_SCHEMA = "airborne_survey_area/1"
+
+    def _area_as_dict(self):
+        boundary = []
+        for lat_entry, lon_entry, lbl_entry in self.coord_rows:
+            lat, lon = lat_entry.get().strip(), lon_entry.get().strip()
+            if lat or lon:
+                boundary.append({"lat": lat, "lon": lon, "label": lbl_entry.get().strip()})
+        return {
+            "schema": self.AREA_SCHEMA,
+            "area_name": self.area_name_entry.get().strip(),
+            "waypoint_prefix": self.prefix_entry.get().strip(),
+            "saved_utc": time.strftime('%Y-%m-%d %H:%MZ', time.gmtime()),
+            # Stored as typed so a round-trip does not silently reformat "10.0" to "10".
+            "parameters": {key: entry.get().strip() for key, entry in self.inputs.items()},
+            "boundary": boundary,
+        }
+
+    def _apply_area_dict(self, data):
+        if not isinstance(data, dict) or "boundary" not in data:
+            raise ValueError("Not an area file: no 'boundary' key.")
+        schema = data.get("schema")
+        if schema and schema != self.AREA_SCHEMA:
+            raise ValueError(f"Unsupported area schema {schema!r}; expected {self.AREA_SCHEMA!r}.")
+
+        boundary = data["boundary"]
+        if len(boundary) > len(self.coord_rows):
+            raise ValueError(f"File has {len(boundary)} boundary points; "
+                             f"only {len(self.coord_rows)} rows are available.")
+
+        for key, value in (data.get("parameters") or {}).items():
+            if key in self.inputs:
+                self.inputs[key].delete(0, tk.END)
+                self.inputs[key].insert(0, str(value))
+
+        if data.get("area_name"):
+            self.area_name_entry.delete(0, tk.END)
+            self.area_name_entry.insert(0, str(data["area_name"]))
+        if data.get("waypoint_prefix"):
+            self.prefix_entry.delete(0, tk.END)
+            self.prefix_entry.insert(0, str(data["waypoint_prefix"]))
+
+        self._clear_gps_fields()
+        for row, point in zip(self.coord_rows, boundary):
+            row[0].insert(0, str(point.get("lat", "")))
+            row[1].insert(0, str(point.get("lon", "")))
+            row[2].insert(0, str(point.get("label", "")))
+
+    def _save_area(self):
+        area_name = self.area_name_entry.get().strip().replace(' ', '_') or "survey_area"
+        path = filedialog.asksaveasfilename(
+            title="Save Area Definition", defaultextension=".json",
+            initialfile=f"{area_name}_area.json",
+            filetypes=[("Area definition", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(self._area_as_dict(), f, indent=2)
+        except OSError as err:
+            messagebox.showerror("Save Failed", str(err))
+            return
+        self.status_var.set(f"Saved area definition to {path}")
+
+    def _load_area(self):
+        path = filedialog.askopenfilename(
+            title="Load Area Definition",
+            filetypes=[("Area definition", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+            self._apply_area_dict(data)
+        except (OSError, ValueError, json.JSONDecodeError) as err:
+            messagebox.showerror("Load Failed", f"{path}\n\n{err}")
+            return
+        self.status_var.set(f"Loaded {os.path.basename(path)} — press Generate to rebuild.")
+        self.calculate_and_render()
+
     def _get_active_coordinates(self):
         active_coords = []
         for idx, (lat_entry, lon_entry, lbl_entry) in enumerate(self.coord_rows):
@@ -638,8 +762,20 @@ class FlightPlannerGUI(tk.Tk):
             messagebox.showerror("Execution Error", str(e))
             return
 
-        # 6. Export waypoint CSV sheets
-        ff_file, hw_file, waypoints = self._export_csv_files(survey_pattern, xy_to_latlon, area_name, waypoint_prefix)
+        # 6. Every artefact for this area lands in its own folder, and the folder carries
+        #    the area definition so it can be reloaded without retyping the points.
+        out_dir = os.path.join(os.getcwd(), area_name)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, f"{area_name}_area.json"), 'w', encoding='utf-8') as f:
+                json.dump(self._area_as_dict(), f, indent=2)
+        except OSError as err:
+            messagebox.showerror("Output Folder Error", f"{out_dir}\n\n{err}")
+            return
+        self._output_dir = out_dir
+
+        ff_file, hw_file, waypoints = self._export_csv_files(
+            survey_pattern, xy_to_latlon, area_name, waypoint_prefix, out_dir)
 
         # 7. Parse and Print Diagnostics Panel
         self.stats_text.delete("1.0", tk.END)
@@ -657,22 +793,37 @@ class FlightPlannerGUI(tk.Tk):
             waypoints, survey_boundary, meta, generated_utc,
         )
         kml_file, kmz_file, pack_file = self._export_foreflight_bundle(
-            area_name, waypoint_prefix, kml_text, waypoints, generated_utc, manifest_stamp)
+            area_name, waypoint_prefix, kml_text, waypoints, generated_utc, manifest_stamp, out_dir)
+
+        # Verify the padding actually achieved rather than assuming the request was met.
+        target_poly = Polygon([to_m.transform(lon, lat) for lat, lon, _ in survey_boundary]).buffer(0)
+        clearance_m = measure_clearance(target_poly, survey_poly)
+        if clearance_m < 0:
+            margin_note = (f"Actual Padding: TARGET NOT FULLY COVERED "
+                           f"({abs(clearance_m)/1000:.2f} km outside)")
+        elif clearance_m < margin * 1000.0 - 1.0:
+            margin_note = (f"Actual Padding: {clearance_m/1000:.2f} km "
+                           f"— SHORT of the {margin:.2f} km requested")
+        else:
+            margin_note = f"Actual Padding: {clearance_m/1000:.2f} km on all sides"
 
         stats_output = [
             f"Survey Identifier: {area_name}",
             f"Prefix Configured: {waypoint_prefix}",
             f"Generated (UTC): {generated_utc}",
+            f"Output Folder: {area_name}{os.sep}",
             f"Active Vertices parsed: {len(survey_boundary)}",
             f"Generated Survey Lines: {len(segments)}",
             f"Ground Heading: {heading:.1f}° True",
+            f"Requested Margin: {margin:.2f} km",
+            margin_note,
             f"Path Metrics: {dist_m/1000:.2f} km ({dist_nm:.2f} nm)",
             f"Est. Flight Time: {time_min:.1f} min",
-            f"Wrote Output: {ff_file}",
-            f"Wrote Output: {hw_file}",
-            f"ForeFlight layer: {kml_file}",
-            f"ForeFlight layer: {kmz_file}",
-            f"Share with pilot: {pack_file}",
+            f"Wrote Output: {os.path.basename(ff_file)}",
+            f"Wrote Output: {os.path.basename(hw_file)}",
+            f"ForeFlight layer: {os.path.basename(kml_file)}",
+            f"ForeFlight layer: {os.path.basename(kmz_file)}",
+            f"Share with pilot: {os.path.basename(pack_file)}",
             "-" * 41
         ]
         for idx, dm, dnm, tmin in segment_summaries:
@@ -719,17 +870,19 @@ class FlightPlannerGUI(tk.Tk):
         folium.PolyLine(pattern_latlon, color='red', weight=4, opacity=0.9, dash_array='5, 6', tooltip='Flight Track').add_to(survey_map)
 
         # 10. Save the interactive map for the browser button (Leaflet needs a real browser)
-        self._map_path = os.path.join(os.getcwd(), f"{area_name}_flight_path.html")
+        self._map_path = os.path.join(out_dir, f"{area_name}_flight_path.html")
         survey_map.save(self._map_path)
 
         self._run_count += 1
+        short = clearance_m < margin * 1000.0 - 1.0
         self.status_var.set(
-            f"Generated {generated_utc} (run #{self._run_count}): {len(segments)} lines, "
-            f"{dist_nm:.1f} nm. AirDrop {kml_file} (or {kmz_file}) for the map overlay; "
-            f"send {pack_file} to the pilot for overlay + waypoints."
+            f"Generated {generated_utc} (run #{self._run_count}) into {area_name}{os.sep}: "
+            f"{len(segments)} lines, {dist_nm:.1f} nm, "
+            f"{clearance_m/1000:.2f} km padding{' (SHORT — check offsets)' if short else ''}. "
+            f"Send {os.path.basename(pack_file)} to the pilot."
         )
 
-    def _export_csv_files(self, flight_pattern, conversion_func, area_name, waypoint_prefix):
+    def _export_csv_files(self, flight_pattern, conversion_func, area_name, waypoint_prefix, out_dir):
         latlon_points = conversion_func(list(flight_pattern.coords))
         deduped = []
         for point in latlon_points:
@@ -741,14 +894,14 @@ class FlightPlannerGUI(tk.Tk):
         waypoints = [(waypoint_prefix + f'{idx:02d}', lat, lon)
                      for idx, (lat, lon) in enumerate(deduped, start=1)]
 
-        ff_file = f"{area_name}_waypoints_foreflight.csv"
+        ff_file = os.path.join(out_dir, f"{area_name}_waypoints_foreflight.csv")
         with open(ff_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['Waypoint', 'Description', 'LAT', 'LONG'])
             for name, lat, lon in waypoints:
                 writer.writerow([name, 'NA', f'{lat:.4f}', f'{lon:.4f}'])
 
-        hw_file = f"{area_name}_waypoints_honeywell.csv"
+        hw_file = os.path.join(out_dir, f"{area_name}_waypoints_honeywell.csv")
         with open(hw_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['E', 'WPT', 'FIX', 'LAT', 'LON'])
@@ -760,7 +913,7 @@ class FlightPlannerGUI(tk.Tk):
         return ff_file, hw_file, waypoints
 
     def _export_foreflight_bundle(self, area_name, waypoint_prefix, kml_text, waypoints,
-                                  generated_utc, manifest_stamp):
+                                  generated_utc, manifest_stamp, out_dir):
         """Write the KML overlay, a KMZ copy, and a content pack bundling both with the CSV.
 
         Three transfer paths, because ForeFlight accepts them differently (foreflight.md):
@@ -769,11 +922,11 @@ class FlightPlannerGUI(tk.Tk):
           .zip  -- content pack: the only route that gets a waypoint CSV onto the iPad
                    without iTunes/Finder, so this is the file to share with the pilot
         """
-        kml_file = f"{area_name}_survey.kml"
+        kml_file = os.path.join(out_dir, f"{area_name}_survey.kml")
         with open(kml_file, 'w', encoding='utf-8', newline='\n') as f:
             f.write(kml_text)
 
-        kmz_file = f"{area_name}_survey.kmz"
+        kmz_file = os.path.join(out_dir, f"{area_name}_survey.kmz")
         with zipfile.ZipFile(kmz_file, 'w', zipfile.ZIP_DEFLATED) as z:
             z.writestr('doc.kml', kml_text)
 
@@ -792,7 +945,7 @@ class FlightPlannerGUI(tk.Tk):
             "effectiveDate": manifest_stamp,
         }
 
-        pack_file = f"{area_name}_foreflight_pack.zip"
+        pack_file = os.path.join(out_dir, f"{area_name}_foreflight_pack.zip")
         root = f"{area_name}_survey"
         with zipfile.ZipFile(pack_file, 'w', zipfile.ZIP_DEFLATED) as z:
             z.writestr(f'{root}/manifest.json', json.dumps(manifest, indent=2))
@@ -803,7 +956,7 @@ class FlightPlannerGUI(tk.Tk):
 
     def _open_export_folder(self):
         """Reveal the output directory so the files can be AirDropped or attached."""
-        folder = os.getcwd()
+        folder = self._output_dir or os.getcwd()
         try:
             if sys.platform == 'win32':
                 os.startfile(folder)

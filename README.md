@@ -59,7 +59,17 @@ python airborne_survey_gui.py
 python airborne_survey_gui2.py
 ```
 
-Outputs created in the current working directory:
+Boundary points and flight parameters can be saved and reloaded with **Save Area…** /
+**Load Area…** on the Boundary GPS tab, so a set of points never has to be retyped. Every
+run also drops a `<AREA>_area.json` next to its outputs, so any past output folder can be
+reloaded as-is.
+
+The survey pattern is clipped to the target boundary **expanded by the perimeter margin**,
+so the requested padding holds on all sides at any heading, and no flying is wasted covering
+a bounding box. The summary panel reports the padding actually achieved — trust that figure
+over the requested one, since a non-zero lat/lon offset shifts coverage and eats into it.
+
+Outputs are created in a per-area folder, `./<AREA>/`:
 
 - `<AREA>_waypoints_foreflight.csv` — waypoint list in ForeFlight's column order
 - `<AREA>_waypoints_honeywell.csv` — Honeywell FMS formatted CSV
@@ -70,6 +80,7 @@ Outputs created in the current working directory:
 - `<AREA>_foreflight_pack.zip` — ForeFlight **content pack** bundling the overlay *and* a
   correctly-named `user_waypoints.csv`. This is the one to send the pilot: he gets the same
   overlay plus real waypoints he can build a route from and override.
+- `<AREA>_area.json` — the boundary points and parameters that produced all of the above
 
 Use **Show Export Files** in the app to open the folder for AirDropping.
 
