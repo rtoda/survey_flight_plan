@@ -5,6 +5,7 @@ import time
 import webbrowser
 from pathlib import Path
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, messagebox
 import numpy as np
 from shapely.geometry import LineString, Polygon, MultiLineString, GeometryCollection
@@ -149,6 +150,10 @@ class FlightPlannerGUI(tk.Tk):
         self._map_path = None
         self._run_count = 0
 
+        # Measured when labelling so a white backing box can be sized to the text.
+        self._label_font = tkfont.Font(family="Helvetica", size=8)
+        self._label_font_bold = tkfont.Font(family="Helvetica", size=8, weight="bold")
+
         self._setup_layout()
         self._load_defaults()
         self.calculate_and_render()
@@ -273,6 +278,33 @@ class FlightPlannerGUI(tk.Tk):
             return
         webbrowser.open(Path(self._map_path).absolute().as_uri())
 
+    def _label(self, x, y, text, anchor="center", fill="#333333", bold=False, avoid=None):
+        """Draw canvas text over a white backing box so it stays legible over the pattern.
+
+        Pass a list as `avoid` to suppress labels that would overlap one already drawn;
+        the box of each label that does get drawn is appended to it. Returns True if the
+        label was drawn, False if it was suppressed.
+        """
+        font = self._label_font_bold if bold else self._label_font
+        text_w = font.measure(text)
+        text_h = font.metrics("linespace")
+        if anchor == "w":
+            x0, x1 = x - 2, x + text_w + 2
+        elif anchor == "e":
+            x0, x1 = x - text_w - 2, x + 2
+        else:
+            x0, x1 = x - text_w / 2 - 2, x + text_w / 2 + 2
+        y0, y1 = y - text_h / 2, y + text_h / 2
+
+        if avoid is not None:
+            if any(x0 < bx1 and bx0 < x1 and y0 < by1 and by0 < y1 for bx0, by0, bx1, by1 in avoid):
+                return False
+            avoid.append((x0, y0, x1, y1))
+
+        self.preview_canvas.create_rectangle(x0, y0, x1, y1, fill="white", outline="")
+        self.preview_canvas.create_text(x, y, text=text, anchor=anchor, fill=fill, font=font)
+        return True
+
     def _draw_preview(self):
         """Render the cached survey geometry (UTM metres, so already equal-aspect)."""
         canvas = self.preview_canvas
@@ -298,14 +330,17 @@ class FlightPlannerGUI(tk.Tk):
         span_x = max(max_x - min_x, 1.0)
         span_y = max(max_y - min_y, 1.0)
 
-        pad = 60
-        scale = min((width - 2 * pad) / span_x, (height - 2 * pad) / span_y)
+        # Asymmetric padding: the top band is reserved for the header and legend and the
+        # bottom for the scale bar, so the pattern is never drawn underneath either.
+        pad, pad_top, pad_bottom = 60, 108, 52
+        scale = min((width - 2 * pad) / span_x, (height - pad_top - pad_bottom) / span_y)
         off_x = (width - span_x * scale) / 2.0
-        off_y = (height - span_y * scale) / 2.0
+        band = height - pad_top - pad_bottom
+        base_y = pad_top + (band + span_y * scale) / 2.0   # screen y of min_y
 
         def to_px(point):
             return (off_x + (point[0] - min_x) * scale,
-                    height - off_y - (point[1] - min_y) * scale)
+                    base_y - (point[1] - min_y) * scale)
 
         # Target buffer envelope
         rect_px = [coord for point in rect for coord in to_px(point)]
@@ -322,18 +357,37 @@ class FlightPlannerGUI(tk.Tk):
         if track_px:
             sx, sy = track_px[0]
             ex, ey = track_px[-1]
-            canvas.create_oval(sx - 6, sy - 6, sx + 6, sy + 6, fill="#12a150", outline="")
-            canvas.create_text(sx + 10, sy - 10, text="START", anchor="w", fill="#12a150",
-                               font=("Helvetica", 8, "bold"))
-            canvas.create_rectangle(ex - 5, ey - 5, ex + 5, ey + 5, fill="#333333", outline="")
-            canvas.create_text(ex + 10, ey + 10, text="END", anchor="w", fill="#333333",
-                               font=("Helvetica", 8, "bold"))
+            canvas.create_oval(sx - 7, sy - 7, sx + 7, sy + 7, fill="", outline="#12a150", width=3)
+            canvas.create_rectangle(ex - 6, ey - 6, ex + 6, ey + 6, fill="", outline="#333333", width=3)
+
+        # Exported flight-plan waypoints, labelled with the names written to the CSVs.
+        # Labels sit outboard of the pattern centre so they clear the track lines.
+        # Seed the collision list with the chrome drawn further down (header, legend,
+        # scale bar, north arrow) so a waypoint label never ends up hidden underneath it.
+        placed, hidden = [(pad - 6, 8, pad + 380, 100),
+                          (pad - 6, height - 44, pad + 300, height - 10),
+                          (width - 46, height - 74, width - 22, height - 22)], 0
+        centre_x = sum(p[0] for p in track_px) / len(track_px) if track_px else 0.0
+        for x, y, name in self._preview['waypoints']:
+            px, py = to_px((x, y))
+            canvas.create_oval(px - 3, py - 3, px + 3, py + 3, fill="#d81b1b", outline="white", width=1)
+            out, back = ((px + 11, "w"), (px - 11, "e")) if px >= centre_x else ((px - 11, "e"), (px + 11, "w"))
+            # Prefer outboard of the pattern, then the far side, then above, then below.
+            spots = [(out[0], py, out[1]), (back[0], py, back[1]),
+                     (px, py - 14, "center"), (px, py + 14, "center")]
+            if not any(self._label(lx, ly, name, anchor=la, fill="#a01010", bold=True, avoid=placed)
+                       for lx, ly, la in spots):
+                hidden += 1
 
         # Boundary waypoints supplied by the operator
         for x, y, label in marks:
             px, py = to_px((x, y))
             canvas.create_oval(px - 5, py - 5, px + 5, py + 5, fill="#7b2fbe", outline="white", width=1)
-            canvas.create_text(px, py - 12, text=label, fill="#4a1a75", font=("Helvetica", 8))
+            spots = [(px, py - 14, "center"), (px, py + 14, "center"),
+                     (px + 9, py, "w"), (px - 9, py, "e")]
+            if not any(self._label(lx, ly, label, anchor=la, fill="#4a1a75", avoid=placed)
+                       for lx, ly, la in spots):
+                hidden += 1
 
         # North arrow (UTM grid north is up); kept low-right, clear of the header text
         nx, ny = width - 34, height - 58
@@ -358,11 +412,15 @@ class FlightPlannerGUI(tk.Tk):
                            text=f"{meta['area_name']}  —  {meta['lines']} survey lines @ "
                                 f"{meta['heading']:.0f}°T  —  {meta['dist_nm']:.1f} nm / "
                                 f"{meta['time_min']:.0f} min")
+        if hidden:
+            canvas.create_text(pad, 34, anchor="w", fill="#a06000", font=("Helvetica", 8, "italic"),
+                               text=f"{hidden} label(s) hidden to avoid overlap — enlarge the window to see them")
+        legend_top = 50 if hidden else 40
         legend = [("#1f6fd0", "Target buffer envelope"),
-                  ("#d81b1b", "Flight track"),
+                  ("#d81b1b", "Flight track & exported waypoints (ring = first, square = last)"),
                   ("#7b2fbe", "Boundary waypoints")]
         for row, (color, text) in enumerate(legend):
-            ly = 40 + row * 16
+            ly = legend_top + row * 16
             canvas.create_line(pad, ly, pad + 18, ly, fill=color, width=3)
             canvas.create_text(pad + 24, ly, anchor="w", text=text, fill="#555555",
                                font=("Helvetica", 8))
@@ -458,7 +516,7 @@ class FlightPlannerGUI(tk.Tk):
             return
 
         # 6. Export waypoint CSV sheets
-        ff_file, hw_file = self._export_csv_files(survey_pattern, xy_to_latlon, area_name, waypoint_prefix)
+        ff_file, hw_file, waypoints = self._export_csv_files(survey_pattern, xy_to_latlon, area_name, waypoint_prefix)
 
         # 7. Parse and Print Diagnostics Panel
         self.stats_text.delete("1.0", tk.END)
@@ -486,6 +544,7 @@ class FlightPlannerGUI(tk.Tk):
             'rect': list(survey_poly.exterior.coords),
             'track': list(survey_pattern.coords),
             'marks': [(*to_m.transform(lon, lat), label) for lat, lon, label in survey_boundary],
+            'waypoints': [(*to_m.transform(lon, lat), name) for name, lat, lon in waypoints],
             'meta': {
                 'area_name': area_name,
                 'lines': len(segments),
@@ -536,23 +595,28 @@ class FlightPlannerGUI(tk.Tk):
             if not deduped or deduped[-1] != point:
                 deduped.append(point)
 
+        # Single source of truth for waypoint names: whatever gets written here is what
+        # the preview labels, so the pane can never disagree with the exported files.
+        waypoints = [(waypoint_prefix + f'{idx:02d}', lat, lon)
+                     for idx, (lat, lon) in enumerate(deduped, start=1)]
+
         ff_file = f"{area_name}_waypoints_foreflight.csv"
         with open(ff_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['Waypoint', 'Description', 'LAT', 'LONG'])
-            for idx, (lat, lon) in enumerate(deduped, start=1):
-                writer.writerow([waypoint_prefix + f'{idx:02d}', 'NA', f'{lat:.4f}', f'{lon:.4f}'])
+            for name, lat, lon in waypoints:
+                writer.writerow([name, 'NA', f'{lat:.4f}', f'{lon:.4f}'])
 
         hw_file = f"{area_name}_waypoints_honeywell.csv"
         with open(hw_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['E', 'WPT', 'FIX', 'LAT', 'LON'])
-            for idx, (lat, lon) in enumerate(deduped, start=1):
+            for name, lat, lon in waypoints:
                 lat_fmt = dd_to_honeywell_format(lat, 'N', 'S')
                 lon_fmt = dd_to_honeywell_format(lon, 'E', 'W')
-                writer.writerow(['X', waypoint_prefix + f'{idx:02d}', 'NA', lat_fmt, lon_fmt])
+                writer.writerow(['X', name, 'NA', lat_fmt, lon_fmt])
 
-        return ff_file, hw_file
+        return ff_file, hw_file, waypoints
 
 if __name__ == "__main__":
     app = FlightPlannerGUI()
