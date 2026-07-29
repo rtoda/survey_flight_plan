@@ -61,9 +61,20 @@ python airborne_survey_gui2.py
 
 Outputs created in the current working directory:
 
-- `<AREA>_waypoints_foreflight.csv` — ForeFlight importable CSV
+- `<AREA>_waypoints_foreflight.csv` — waypoint list in ForeFlight's column order
 - `<AREA>_waypoints_honeywell.csv` — Honeywell FMS formatted CSV
 - `<AREA>_flight_path.html` — Folium map (open with the button, or double-click the file)
+- `<AREA>_survey.kml` / `.kmz` — survey pattern as a ForeFlight **map layer**: AirDrop or
+  email it and the lines, buffer and named points display as a toggleable overlay without
+  entering the waypoint database
+- `<AREA>_foreflight_pack.zip` — ForeFlight **content pack** bundling the overlay *and* a
+  correctly-named `user_waypoints.csv`. This is the one to send the pilot: he gets the same
+  overlay plus real waypoints he can build a route from and override.
+
+Use **Show Export Files** in the app to open the folder for AirDropping.
+
+See [foreflight.md](foreflight.md) for the import rules these files are built against,
+including which claims are verified against ForeFlight's docs and which are not.
 
 ## Notes & Tips
 - Ensure the waypoint prefix is exactly 3 characters (the GUI enforces this).

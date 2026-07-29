@@ -1,9 +1,15 @@
 import os
 import csv
+import io
+import json
 import math
+import subprocess
+import sys
 import time
 import webbrowser
+import zipfile
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox
@@ -127,6 +133,105 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
     pattern_line = LineString(pattern_points)
     rotated_pattern = affinity.rotate(pattern_line, heading_angle_deg, origin='centroid', use_radians=False)
     return survey_rect, rotated_pattern, pass_segments
+
+# --- FOREFLIGHT KML / CONTENT PACK EXPORT ---
+#
+# ForeFlight renders only a subset of KML: Point, LineString, LinearRing, Polygon,
+# MultiGeometry, Style, StyleMap (normal style only), LineStyle, PolyStyle, IconStyle and
+# the gx: namespace. Nothing outside that list is used here. See foreflight.md.
+#
+# Because this document carries shape geometry (a Polygon and a LineString) ForeFlight
+# imports it as a User Map Layer, not as user waypoints -- which is what makes the named
+# points show up as overlay labels without entering the waypoint database.
+
+def kml_colour(hex_rgb, alpha="ff"):
+    """#rrggbb -> KML aabbggrr (KML orders the channels backwards from CSS)."""
+    rgb = hex_rgb.lstrip('#')
+    return f"{alpha}{rgb[4:6]}{rgb[2:4]}{rgb[0:2]}"
+
+
+def build_survey_kml(area_name, envelope_latlon, track_latlon, waypoints, boundary, meta,
+                     generated_utc):
+    """Return a ForeFlight-compatible KML overlay of the survey pattern."""
+
+    def coords(points):
+        # KML is lon,lat -- longitude first, opposite of this app's internal ordering.
+        return " ".join(f"{lon:.6f},{lat:.6f}" for lat, lon in points)
+
+    summary = (f"{meta['lines']} survey lines @ {meta['heading']:.0f}°T — "
+               f"{meta['dist_nm']:.1f} nm / {meta['time_min']:.0f} min")
+    out = io.StringIO()
+    w = out.write
+    w('<?xml version="1.0" encoding="UTF-8"?>\n')
+    w('<kml xmlns="http://www.opengis.net/kml/2.2" '
+      'xmlns:gx="http://www.google.com/kml/ext/2.2">\n')
+    w('  <Document>\n')
+    w(f'    <name>{xml_escape(area_name)} survey</name>\n')
+    w(f'    <description>{xml_escape(summary)} — generated {generated_utc}</description>\n')
+
+    w('    <Style id="envelope">\n'
+      f'      <LineStyle><color>{kml_colour("1f6fd0")}</color><width>2</width></LineStyle>\n'
+      f'      <PolyStyle><color>{kml_colour("1f6fd0", "26")}</color></PolyStyle>\n'
+      '    </Style>\n')
+    # gx:labelVisibility puts the Placemark <name> onto the line itself. Google spells the
+    # element with a lower-case l; ForeFlight's docs write "gx:LabelVisibility". If the
+    # track label does not appear in the app, that capitalisation is the thing to flip.
+    w('    <Style id="track">\n'
+      f'      <LineStyle><color>{kml_colour("d81b1b")}</color><width>4</width>'
+      '<gx:labelVisibility>1</gx:labelVisibility></LineStyle>\n'
+      '    </Style>\n')
+    w('    <Style id="waypoint">\n'
+      f'      <IconStyle><color>{kml_colour("d81b1b")}</color><scale>0.7</scale></IconStyle>\n'
+      '    </Style>\n')
+    w('    <Style id="boundary">\n'
+      f'      <IconStyle><color>{kml_colour("7b2fbe")}</color><scale>0.9</scale></IconStyle>\n'
+      '    </Style>\n')
+
+    w('    <Folder>\n      <name>Survey area</name>\n')
+    w('      <Placemark>\n'
+      f'        <name>{xml_escape(area_name)} buffer envelope</name>\n'
+      '        <styleUrl>#envelope</styleUrl>\n'
+      '        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs>'
+      f'<LinearRing><coordinates>{coords(envelope_latlon)}</coordinates></LinearRing>'
+      '</outerBoundaryIs></Polygon>\n'
+      '      </Placemark>\n')
+    w('    </Folder>\n')
+
+    w('    <Folder>\n      <name>Flight track</name>\n')
+    w('      <Placemark>\n'
+      f'        <name>{xml_escape(area_name)} — {xml_escape(summary)}</name>\n'
+      '        <styleUrl>#track</styleUrl>\n'
+      '        <LineString><tessellate>1</tessellate>'
+      '<altitudeMode>clampToGround</altitudeMode>'
+      f'<coordinates>{coords(track_latlon)}</coordinates></LineString>\n'
+      '      </Placemark>\n')
+    w('    </Folder>\n')
+
+    w('    <Folder>\n      <name>Survey waypoints</name>\n')
+    for idx, (name, lat, lon) in enumerate(waypoints, start=1):
+        w('      <Placemark>\n'
+          f'        <name>{xml_escape(name)}</name>\n'
+          f'        <description>waypoint {idx} of {len(waypoints)} — '
+          f'{lat:.4f}, {lon:.4f}</description>\n'
+          '        <styleUrl>#waypoint</styleUrl>\n'
+          f'        <Point><coordinates>{lon:.6f},{lat:.6f}</coordinates></Point>\n'
+          '      </Placemark>\n')
+    w('    </Folder>\n')
+
+    if boundary:
+        w('    <Folder>\n      <name>Target boundary points</name>\n')
+        for lat, lon, label in boundary:
+            w('      <Placemark>\n'
+              f'        <name>{xml_escape(label)}</name>\n'
+              f'        <description>{lat:.5f}, {lon:.5f}</description>\n'
+              '        <styleUrl>#boundary</styleUrl>\n'
+              f'        <Point><coordinates>{lon:.6f},{lat:.6f}</coordinates></Point>\n'
+              '      </Placemark>\n')
+        w('    </Folder>\n')
+
+    w('  </Document>\n</kml>\n')
+    return out.getvalue()
+
 
 # --- GUI APPLICATION CLASS ---
 
@@ -272,6 +377,8 @@ class FlightPlannerGUI(tk.Tk):
         ttk.Label(preview_header, text="Flight Path Preview", font=("Helvetica", 10, "bold")).pack(side=tk.LEFT)
         ttk.Button(preview_header, text="Open Interactive Map in Browser",
                    command=self._open_map_in_browser).pack(side=tk.RIGHT)
+        ttk.Button(preview_header, text="Show Export Files",
+                   command=self._open_export_folder).pack(side=tk.RIGHT, padx=(0, 8))
         # View-only toggles: they redraw from cached geometry, they do not recalculate.
         ttk.Checkbutton(preview_header, text="Boundary labels", variable=self.show_boundary_labels,
                         command=self._draw_preview).pack(side=tk.RIGHT, padx=(0, 14))
@@ -538,9 +645,24 @@ class FlightPlannerGUI(tk.Tk):
         self.stats_text.delete("1.0", tk.END)
         segment_summaries, dist_m, dist_nm, time_min = summarize_segment_travel(survey_pattern, gs)
 
+        generated_utc = time.strftime('%Y-%m-%d %H:%MZ', time.gmtime())
+        manifest_stamp = time.strftime('%Y%m%dT%H:%M:%SZ', time.gmtime())
+        meta = {'lines': len(segments), 'heading': heading,
+                'dist_nm': dist_nm, 'time_min': time_min}
+
+        kml_text = build_survey_kml(
+            area_name,
+            xy_to_latlon(list(survey_poly.exterior.coords)),
+            xy_to_latlon(list(survey_pattern.coords)),
+            waypoints, survey_boundary, meta, generated_utc,
+        )
+        kml_file, kmz_file, pack_file = self._export_foreflight_bundle(
+            area_name, waypoint_prefix, kml_text, waypoints, generated_utc, manifest_stamp)
+
         stats_output = [
             f"Survey Identifier: {area_name}",
             f"Prefix Configured: {waypoint_prefix}",
+            f"Generated (UTC): {generated_utc}",
             f"Active Vertices parsed: {len(survey_boundary)}",
             f"Generated Survey Lines: {len(segments)}",
             f"Ground Heading: {heading:.1f}° True",
@@ -548,6 +670,9 @@ class FlightPlannerGUI(tk.Tk):
             f"Est. Flight Time: {time_min:.1f} min",
             f"Wrote Output: {ff_file}",
             f"Wrote Output: {hw_file}",
+            f"ForeFlight layer: {kml_file}",
+            f"ForeFlight layer: {kmz_file}",
+            f"Share with pilot: {pack_file}",
             "-" * 41
         ]
         for idx, dm, dnm, tmin in segment_summaries:
@@ -599,9 +724,9 @@ class FlightPlannerGUI(tk.Tk):
 
         self._run_count += 1
         self.status_var.set(
-            f"Generated at {time.strftime('%H:%M:%S')} (run #{self._run_count}): "
-            f"{len(segments)} lines, {dist_nm:.1f} nm. Wrote {ff_file}, {hw_file}, "
-            f"{os.path.basename(self._map_path)}."
+            f"Generated {generated_utc} (run #{self._run_count}): {len(segments)} lines, "
+            f"{dist_nm:.1f} nm. AirDrop {kml_file} (or {kmz_file}) for the map overlay; "
+            f"send {pack_file} to the pilot for overlay + waypoints."
         )
 
     def _export_csv_files(self, flight_pattern, conversion_func, area_name, waypoint_prefix):
@@ -633,6 +758,61 @@ class FlightPlannerGUI(tk.Tk):
                 writer.writerow(['X', name, 'NA', lat_fmt, lon_fmt])
 
         return ff_file, hw_file, waypoints
+
+    def _export_foreflight_bundle(self, area_name, waypoint_prefix, kml_text, waypoints,
+                                  generated_utc, manifest_stamp):
+        """Write the KML overlay, a KMZ copy, and a content pack bundling both with the CSV.
+
+        Three transfer paths, because ForeFlight accepts them differently (foreflight.md):
+          .kml  -- AirDrop / email / "Copy to ForeFlight"; imports as a User Map Layer
+          .kmz  -- same, zipped; survives mail clients that mangle raw XML attachments
+          .zip  -- content pack: the only route that gets a waypoint CSV onto the iPad
+                   without iTunes/Finder, so this is the file to share with the pilot
+        """
+        kml_file = f"{area_name}_survey.kml"
+        with open(kml_file, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(kml_text)
+
+        kmz_file = f"{area_name}_survey.kmz"
+        with zipfile.ZipFile(kmz_file, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('doc.kml', kml_text)
+
+        # ForeFlight requires the waypoint CSV to be named exactly user_waypoints.csv, and
+        # it must sit in the pack's navdata/ folder. Column order matters, names do not.
+        wp_csv = io.StringIO()
+        writer = csv.writer(wp_csv, lineterminator='\n')
+        writer.writerow(['Name', 'Description', 'Latitude', 'Longitude'])
+        for name, lat, lon in waypoints:
+            writer.writerow([name, f'{area_name} {generated_utc}', f'{lat:.4f}', f'{lon:.4f}'])
+
+        manifest = {
+            "name": f"{area_name} Survey",
+            "abbreviation": waypoint_prefix,
+            "version": 1,
+            "effectiveDate": manifest_stamp,
+        }
+
+        pack_file = f"{area_name}_foreflight_pack.zip"
+        root = f"{area_name}_survey"
+        with zipfile.ZipFile(pack_file, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr(f'{root}/manifest.json', json.dumps(manifest, indent=2))
+            z.writestr(f'{root}/layers/{area_name}_survey.kml', kml_text)
+            z.writestr(f'{root}/navdata/user_waypoints.csv', wp_csv.getvalue())
+
+        return kml_file, kmz_file, pack_file
+
+    def _open_export_folder(self):
+        """Reveal the output directory so the files can be AirDropped or attached."""
+        folder = os.getcwd()
+        try:
+            if sys.platform == 'win32':
+                os.startfile(folder)
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', folder], check=False)
+            else:
+                subprocess.run(['xdg-open', folder], check=False)
+        except Exception as err:
+            messagebox.showerror("Could Not Open Folder", f"{folder}\n\n{err}")
 
 if __name__ == "__main__":
     app = FlightPlannerGUI()

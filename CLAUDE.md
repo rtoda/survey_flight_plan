@@ -14,8 +14,23 @@ exports waypoints for ForeFlight and a Honeywell FMS.
   without re-checking the source.
   - Note: `support.foreflight.com` returns 403 to automated fetching; use the
     `foreflight.com/support/...` pages instead.
-  - It also lists known mismatches between the current exports and ForeFlight's documented
-    expectations, deliberately **not** acted on. Check that list before "fixing" an export.
+  - It documents what the app now exports for ForeFlight (KML, KMZ, content pack) and the
+    KML gotchas: coordinates are `lon,lat`, colours are `aabbggrr`, only `StyleMap`'s
+    `normal` style is read. It also lists the mismatches deliberately **not** fixed —
+    check that list before "fixing" an export.
+
+## Export invariants
+
+`calculate_and_render` writes six files. Two are load-bearing contracts:
+
+- The Honeywell CSV and the legacy `<AREA>_waypoints_foreflight.csv` are **byte-frozen**.
+  They have been verified byte-identical to the original pre-refactor output through every
+  change so far — diff them against a baseline after touching geometry or export code.
+- `navdata/user_waypoints.csv` inside the content pack **must keep that exact filename**;
+  ForeFlight will not recognise it otherwise, and it fails silently rather than erroring.
+
+`build_survey_kml` must emit only elements from ForeFlight's documented subset. A test
+asserts this — if you add a KML element, check it against the list in foreflight.md first.
 
 ## Environment
 

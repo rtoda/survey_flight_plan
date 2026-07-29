@@ -143,27 +143,60 @@ CSV together in one AirDrop-able file.
 
 ---
 
-## What this means for this repo
+## What this repo now exports
 
-Findings that bear on `airborne_survey_gui.py` as it stands. **Not acted on** — recorded
-only.
+Each run of `airborne_survey_gui.py` writes three ForeFlight-targeted files, one per
+transfer path. Built by `build_survey_kml()` and `_export_foreflight_bundle()`.
 
-1. **Export filename will not be recognised.** The app writes
-   `<AREA>_waypoints_foreflight.csv`; ForeFlight reportedly wants exactly
-   `user_waypoints.csv`, or that name inside a content pack's `navdata/`.
-2. **Waypoint names are already correct.** `CLM01` satisfies all-caps, ≥3 chars, ≥1 letter,
+| File | Import path | Becomes |
+|---|---|---|
+| `<AREA>_survey.kml` | AirDrop, email, "Copy to ForeFlight" | User Map Layer |
+| `<AREA>_survey.kmz` | same, zipped — survives mail clients that mangle raw XML | User Map Layer |
+| `<AREA>_foreflight_pack.zip` | AirDrop/email → **More > Custom Content** | layer **+** waypoints |
+
+The KML carries a `Polygon` and a `LineString` as well as `Point`s, so ForeFlight should
+classify it as a **map layer** rather than offering the points as user waypoints. That
+classification rule is documented ⭐; that our specific file triggers the layer branch is
+**inferred, not observed in the app.**
+
+Content pack layout produced:
+
+```
+<AREA>_survey/
+├── manifest.json                       name, abbreviation (= waypoint prefix), version, effectiveDate
+├── layers/<AREA>_survey.kml            the overlay
+└── navdata/user_waypoints.csv          correctly-named waypoint CSV
+```
+
+A test asserts the KML uses **only** elements from ForeFlight's documented subset, that
+coordinates are emitted `lon,lat`, and that every waypoint name is all-caps / no spaces /
+≥3 chars / contains a letter.
+
+### Still not addressed
+
+1. **The legacy `<AREA>_waypoints_foreflight.csv` keeps its old name** and therefore still
+   will not import directly. It is left alone deliberately — the correctly-named copy lives
+   inside the content pack. Its `Description` column is still `NA` where the docs suggest
+   `""`.
+2. **Elevation column is unused** in both CSVs. Adding it would improve flight-plan accuracy
+   and enable Profile View — relevant for a survey flown at fixed altitude.
+3. **Waypoint names were already correct.** `CLM01` satisfies all-caps, ≥3 chars, ≥1 letter,
    no spaces. (An earlier search summary claiming names must be *lowercase* is contradicted
    by two directly-fetched pages.)
-3. **Coordinates are already correct** — decimal degrees, negative for West.
-4. **Header row is probably fine**, since column names are said not to matter.
-5. **`Description` is written as `NA`.** Docs say use `""` when there is nothing to say;
-   `NA` will display as a description reading "NA".
-6. **Elevation column is unused.** Adding it would improve flight-plan accuracy and enable
-   Profile View — relevant for a survey flown at a fixed altitude.
-7. **No KML output exists.** The repo's only ForeFlight paths are the CSV and the
-   `foreflightmobile://maps/search?q=` route URL in `SendToForeFlight.ipynb`. A KML
-   overlay of the survey lines is the missing piece for a non-waypoint display of the
-   pattern, and unlike CSV it can be AirDropped.
+4. `SendToForeFlight.ipynb` still has its own separate `foreflightmobile://maps/search?q=`
+   route URL path, untouched by any of this.
+
+## KML gotchas worth remembering
+
+- **Coordinates are `lon,lat`** — longitude first, the opposite of this app's internal
+  ordering. Easy to invert silently.
+- **Colours are `aabbggrr`**, not `rrggbb` — channel order is reversed from CSS and the
+  alpha comes first. `kml_colour()` does the conversion.
+- **`StyleMap`: only the `normal` style is read** ⭐, so plain `<Style>` is safer.
+- **`gx:labelVisibility`** is a boolean child of `<LineStyle>` that draws the Placemark
+  `<name>` along a LineString. Google's canonical spelling is lower-case `l`; ForeFlight's
+  docs write "gx:LabelVisibility". We emit Google's spelling — ❓ if the track label never
+  appears in the app, that capitalisation is the first thing to try flipping.
 
 ## Open questions
 
