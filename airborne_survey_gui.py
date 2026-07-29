@@ -154,6 +154,11 @@ class FlightPlannerGUI(tk.Tk):
         self._label_font = tkfont.Font(family="Helvetica", size=8)
         self._label_font_bold = tkfont.Font(family="Helvetica", size=8, weight="bold")
 
+        # Label visibility: on by default, but a dense survey crowds the pane so both
+        # sets can be switched off without regenerating the plan.
+        self.show_waypoint_labels = tk.BooleanVar(value=True)
+        self.show_boundary_labels = tk.BooleanVar(value=True)
+
         self._setup_layout()
         self._load_defaults()
         self.calculate_and_render()
@@ -267,6 +272,11 @@ class FlightPlannerGUI(tk.Tk):
         ttk.Label(preview_header, text="Flight Path Preview", font=("Helvetica", 10, "bold")).pack(side=tk.LEFT)
         ttk.Button(preview_header, text="Open Interactive Map in Browser",
                    command=self._open_map_in_browser).pack(side=tk.RIGHT)
+        # View-only toggles: they redraw from cached geometry, they do not recalculate.
+        ttk.Checkbutton(preview_header, text="Boundary labels", variable=self.show_boundary_labels,
+                        command=self._draw_preview).pack(side=tk.RIGHT, padx=(0, 14))
+        ttk.Checkbutton(preview_header, text="Waypoint labels", variable=self.show_waypoint_labels,
+                        command=self._draw_preview).pack(side=tk.RIGHT, padx=(0, 14))
 
         self.preview_canvas = tk.Canvas(right_frame, bg="white", highlightthickness=0)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
@@ -368,9 +378,12 @@ class FlightPlannerGUI(tk.Tk):
                           (pad - 6, height - 44, pad + 300, height - 10),
                           (width - 46, height - 74, width - 22, height - 22)], 0
         centre_x = sum(p[0] for p in track_px) / len(track_px) if track_px else 0.0
+        show_wp = self.show_waypoint_labels.get()
         for x, y, name in self._preview['waypoints']:
             px, py = to_px((x, y))
             canvas.create_oval(px - 3, py - 3, px + 3, py + 3, fill="#d81b1b", outline="white", width=1)
+            if not show_wp:
+                continue
             out, back = ((px + 11, "w"), (px - 11, "e")) if px >= centre_x else ((px - 11, "e"), (px + 11, "w"))
             # Prefer outboard of the pattern, then the far side, then above, then below.
             spots = [(out[0], py, out[1]), (back[0], py, back[1]),
@@ -380,9 +393,12 @@ class FlightPlannerGUI(tk.Tk):
                 hidden += 1
 
         # Boundary waypoints supplied by the operator
+        show_bnd = self.show_boundary_labels.get()
         for x, y, label in marks:
             px, py = to_px((x, y))
             canvas.create_oval(px - 5, py - 5, px + 5, py + 5, fill="#7b2fbe", outline="white", width=1)
+            if not show_bnd:
+                continue
             spots = [(px, py - 14, "center"), (px, py + 14, "center"),
                      (px + 9, py, "w"), (px - 9, py, "e")]
             if not any(self._label(lx, ly, label, anchor=la, fill="#4a1a75", avoid=placed)
