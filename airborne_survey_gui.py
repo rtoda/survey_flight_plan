@@ -1,6 +1,8 @@
 import os
 import csv
 import math
+import time
+import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -9,7 +11,6 @@ from shapely.geometry import LineString, Polygon, MultiLineString, GeometryColle
 from shapely import affinity
 from pyproj import CRS, Transformer
 import folium
-from tkinterweb import HtmlFrame 
 
 # --- SURVEY ENGINE CONFIGURATION & HELPERS ---
 
@@ -142,6 +143,12 @@ class FlightPlannerGUI(tk.Tk):
             (43.635, -116.176, 'Crestline_Trailhead')
         ]
         
+        # Geometry cached for the preview canvas so a window resize can redraw it,
+        # plus the path of the last saved Folium map for the "open in browser" button.
+        self._preview = None
+        self._map_path = None
+        self._run_count = 0
+
         self._setup_layout()
         self._load_defaults()
         self.calculate_and_render()
@@ -234,16 +241,131 @@ class FlightPlannerGUI(tk.Tk):
         calculate_btn = ttk.Button(left_frame, text="Generate Flight Plan & Update Map", command=self.calculate_and_render)
         calculate_btn.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
 
-        # --- FLIGHT STATISTICS WINDOW ---
-        ttk.Label(left_frame, text="Flight Path Summary Output", font=("Helvetica", 10, "bold")).grid(row=2, column=0, columnspan=2, pady=(10, 2), sticky="w")
-        self.stats_text = tk.Text(left_frame, width=45, height=15, wrap=tk.WORD, font=("Courier", 11))
-        self.stats_text.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=5)
-        
-        left_frame.rowconfigure(3, weight=1)
+        # Visible confirmation that a click was handled, even when the inputs are unchanged.
+        self.status_var = tk.StringVar(value="Ready.")
+        ttk.Label(left_frame, textvariable=self.status_var, foreground="#0b6b3a", wraplength=330,
+                  justify=tk.LEFT).grid(row=2, column=0, columnspan=2, sticky="w")
 
-        # --- INTERACTIVE MAP DISPLAY ---
-        self.map_view = HtmlFrame(right_frame)
-        self.map_view.pack(fill=tk.BOTH, expand=True)
+        # --- FLIGHT STATISTICS WINDOW ---
+        ttk.Label(left_frame, text="Flight Path Summary Output", font=("Helvetica", 10, "bold")).grid(row=3, column=0, columnspan=2, pady=(10, 2), sticky="w")
+        self.stats_text = tk.Text(left_frame, width=45, height=15, wrap=tk.WORD, font=("Courier", 11))
+        self.stats_text.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=5)
+
+        left_frame.columnconfigure(0, weight=1)
+        left_frame.rowconfigure(4, weight=1)
+
+        # --- FLIGHT PATH PREVIEW ---
+        # Drawn on a native Tk canvas: the Folium map is Leaflet/JavaScript, which the
+        # embedded HTML widget cannot execute, so it only ever rendered a blank page.
+        preview_header = ttk.Frame(right_frame, padding=(8, 6))
+        preview_header.pack(fill=tk.X)
+        ttk.Label(preview_header, text="Flight Path Preview", font=("Helvetica", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Button(preview_header, text="Open Interactive Map in Browser",
+                   command=self._open_map_in_browser).pack(side=tk.RIGHT)
+
+        self.preview_canvas = tk.Canvas(right_frame, bg="white", highlightthickness=0)
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+        self.preview_canvas.bind("<Configure>", lambda _event: self._draw_preview())
+
+    def _open_map_in_browser(self):
+        if not self._map_path or not os.path.exists(self._map_path):
+            messagebox.showinfo("No Map Yet", "Generate a flight plan first.")
+            return
+        webbrowser.open(Path(self._map_path).absolute().as_uri())
+
+    def _draw_preview(self):
+        """Render the cached survey geometry (UTM metres, so already equal-aspect)."""
+        canvas = self.preview_canvas
+        canvas.delete("all")
+        width, height = canvas.winfo_width(), canvas.winfo_height()
+        if width < 60 or height < 60:
+            return
+
+        if not self._preview:
+            canvas.create_text(width / 2, height / 2, fill="#888888", font=("Helvetica", 11),
+                               text="Click 'Generate Flight Plan & Update Map' to draw the survey pattern.")
+            return
+
+        rect = self._preview['rect']
+        track = self._preview['track']
+        marks = self._preview['marks']
+
+        points = list(rect) + list(track) + [(x, y) for x, y, _ in marks]
+        min_x = min(p[0] for p in points)
+        max_x = max(p[0] for p in points)
+        min_y = min(p[1] for p in points)
+        max_y = max(p[1] for p in points)
+        span_x = max(max_x - min_x, 1.0)
+        span_y = max(max_y - min_y, 1.0)
+
+        pad = 60
+        scale = min((width - 2 * pad) / span_x, (height - 2 * pad) / span_y)
+        off_x = (width - span_x * scale) / 2.0
+        off_y = (height - span_y * scale) / 2.0
+
+        def to_px(point):
+            return (off_x + (point[0] - min_x) * scale,
+                    height - off_y - (point[1] - min_y) * scale)
+
+        # Target buffer envelope
+        rect_px = [coord for point in rect for coord in to_px(point)]
+        canvas.create_polygon(rect_px, fill="#eaf1fb", outline="#1f6fd0", width=2)
+
+        # Flight track, with a direction arrow on each leg long enough to show one
+        track_px = [to_px(point) for point in track]
+        for start, end in zip(track_px, track_px[1:]):
+            long_enough = math.hypot(end[0] - start[0], end[1] - start[1]) > 45
+            canvas.create_line(start[0], start[1], end[0], end[1], fill="#d81b1b", width=2,
+                               dash=(6, 4), arrow=tk.LAST if long_enough else None,
+                               arrowshape=(12, 14, 5))
+
+        if track_px:
+            sx, sy = track_px[0]
+            ex, ey = track_px[-1]
+            canvas.create_oval(sx - 6, sy - 6, sx + 6, sy + 6, fill="#12a150", outline="")
+            canvas.create_text(sx + 10, sy - 10, text="START", anchor="w", fill="#12a150",
+                               font=("Helvetica", 8, "bold"))
+            canvas.create_rectangle(ex - 5, ey - 5, ex + 5, ey + 5, fill="#333333", outline="")
+            canvas.create_text(ex + 10, ey + 10, text="END", anchor="w", fill="#333333",
+                               font=("Helvetica", 8, "bold"))
+
+        # Boundary waypoints supplied by the operator
+        for x, y, label in marks:
+            px, py = to_px((x, y))
+            canvas.create_oval(px - 5, py - 5, px + 5, py + 5, fill="#7b2fbe", outline="white", width=1)
+            canvas.create_text(px, py - 12, text=label, fill="#4a1a75", font=("Helvetica", 8))
+
+        # North arrow (UTM grid north is up); kept low-right, clear of the header text
+        nx, ny = width - 34, height - 58
+        canvas.create_line(nx, ny + 16, nx, ny - 12, fill="#333333", width=2,
+                           arrow=tk.LAST, arrowshape=(10, 12, 4))
+        canvas.create_text(nx, ny + 27, text="N", fill="#333333", font=("Helvetica", 9, "bold"))
+
+        # Scale bar
+        bar_km = next((km for km in (1, 2, 5, 10, 20, 25, 50, 100, 200, 500)
+                       if km * 1000 * scale >= (width - 2 * pad) * 0.25), 500)
+        bar_px = bar_km * 1000 * scale
+        bx, by = pad, height - 24
+        canvas.create_line(bx, by, bx + bar_px, by, fill="#333333", width=3)
+        for end_x in (bx, bx + bar_px):
+            canvas.create_line(end_x, by - 5, end_x, by + 5, fill="#333333", width=2)
+        canvas.create_text(bx + bar_px / 2, by - 13, text=f"{bar_km} km", fill="#333333",
+                           font=("Helvetica", 9))
+
+        # Header / legend
+        meta = self._preview['meta']
+        canvas.create_text(pad, 20, anchor="w", fill="#222222", font=("Helvetica", 10, "bold"),
+                           text=f"{meta['area_name']}  —  {meta['lines']} survey lines @ "
+                                f"{meta['heading']:.0f}°T  —  {meta['dist_nm']:.1f} nm / "
+                                f"{meta['time_min']:.0f} min")
+        legend = [("#1f6fd0", "Target buffer envelope"),
+                  ("#d81b1b", "Flight track"),
+                  ("#7b2fbe", "Boundary waypoints")]
+        for row, (color, text) in enumerate(legend):
+            ly = 40 + row * 16
+            canvas.create_line(pad, ly, pad + 18, ly, fill=color, width=3)
+            canvas.create_text(pad + 24, ly, anchor="w", text=text, fill="#555555",
+                               font=("Helvetica", 8))
 
     def _load_defaults(self):
         # Pre-populate fields with default Clairmont Fire Coordinates
@@ -356,10 +478,25 @@ class FlightPlannerGUI(tk.Tk):
         ]
         for idx, dm, dnm, tmin in segment_summaries:
             stats_output.append(f"Segment {idx:02d}: {dm/1000:.1f} km | {tmin:.1f} min")
-        
+
         self.stats_text.insert(tk.END, "\n".join(stats_output))
 
-        # 8. Render dynamic map using Folium
+        # 8. Refresh the in-window preview (UTM metres, matching the geometry engine)
+        self._preview = {
+            'rect': list(survey_poly.exterior.coords),
+            'track': list(survey_pattern.coords),
+            'marks': [(*to_m.transform(lon, lat), label) for lat, lon, label in survey_boundary],
+            'meta': {
+                'area_name': area_name,
+                'lines': len(segments),
+                'heading': heading,
+                'dist_nm': dist_nm,
+                'time_min': time_min,
+            },
+        }
+        self._draw_preview()
+
+        # 9. Render dynamic map using Folium
         survey_map = folium.Map(location=[center_lat, center_lon], zoom_start=12)
 
         # Hull Perimeter Boundaries (Blue Envelope)
@@ -381,13 +518,16 @@ class FlightPlannerGUI(tk.Tk):
         pattern_latlon = xy_to_latlon(list(survey_pattern.coords))
         folium.PolyLine(pattern_latlon, color='red', weight=4, opacity=0.9, dash_array='5, 6', tooltip='Flight Track').add_to(survey_map)
 
-        # 9. Save and Display Map dynamically INSIDE the Tkinter GUI Window
-        temp_map_path = os.path.join(os.getcwd(), "temp_survey_map.html")
-        survey_map.save(temp_map_path)
-        
-        # Convert local file path to an absolute URI for flawless rendering inside tkinterweb
-        file_uri = Path(temp_map_path).absolute().as_uri()
-        self.map_view.load_url(file_uri)
+        # 10. Save the interactive map for the browser button (Leaflet needs a real browser)
+        self._map_path = os.path.join(os.getcwd(), f"{area_name}_flight_path.html")
+        survey_map.save(self._map_path)
+
+        self._run_count += 1
+        self.status_var.set(
+            f"Generated at {time.strftime('%H:%M:%S')} (run #{self._run_count}): "
+            f"{len(segments)} lines, {dist_nm:.1f} nm. Wrote {ff_file}, {hw_file}, "
+            f"{os.path.basename(self._map_path)}."
+        )
 
     def _export_csv_files(self, flight_pattern, conversion_func, area_name, waypoint_prefix):
         latlon_points = conversion_func(list(flight_pattern.coords))
