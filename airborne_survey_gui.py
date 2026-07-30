@@ -302,6 +302,68 @@ def build_survey_kml(area_name, envelope_latlon, track_latlon, waypoints, bounda
     return out.getvalue()
 
 
+# --- HOVER HELP ---
+
+class ToolTip:
+    """Hover help for a widget; Tkinter has no built-in tooltip.
+
+    Binds with add="+" so it never displaces a handler the widget already has.
+    """
+
+    DELAY_MS = 450
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self._after_id = None
+        self._window = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.DELAY_MS, self._show)
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        self._after_id = None
+        # The widget can be gone by the time a pending callback fires.
+        if self._window is not None or not self.widget.winfo_exists():
+            return
+
+        window = tk.Toplevel(self.widget)
+        window.wm_overrideredirect(True)
+        for setup in (lambda: window.wm_attributes("-topmost", True),
+                      # Borderless windows need this on macOS or they steal focus.
+                      lambda: window.tk.call("::tk::unsupported::MacWindowStyle", "style",
+                                             window._w, "help", "noActivates")):
+            try:
+                setup()
+            except tk.TclError:
+                pass
+
+        tk.Label(window, text=self.text, justify=tk.LEFT, background="#ffffe0",
+                 foreground="#111111", relief=tk.SOLID, borderwidth=1, wraplength=340,
+                 font=("Helvetica", 9), padx=7, pady=5).pack()
+        window.wm_geometry(f"+{self.widget.winfo_rootx() + 16}"
+                           f"+{self.widget.winfo_rooty() + self.widget.winfo_height() + 6}")
+        self._window = window
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._window is not None:
+            self._window.destroy()
+            self._window = None
+
+
 # --- GUI APPLICATION CLASS ---
 
 class FlightPlannerGUI(tk.Tk):
@@ -386,14 +448,33 @@ class FlightPlannerGUI(tk.Tk):
 
         # Flight settings fields
         ttk.Label(param_tab, text="Flight Parameters", font=("Helvetica", 10, "bold")).grid(row=4, column=0, sticky="w", pady=(0, 5))
-        ttk.Checkbutton(param_tab, text="Rectangular Box", variable=self.rectangular_box,
-                        command=self.calculate_and_render).grid(row=4, column=1, sticky="w", padx=10)
+        rect_check = ttk.Checkbutton(param_tab, text="Rectangular Box",
+                                     variable=self.rectangular_box,
+                                     command=self.calculate_and_render)
+        rect_check.grid(row=4, column=1, sticky="w", padx=10)
+        ToolTip(rect_check,
+                "ON (normal): fly the smallest rectangle that covers the target plus its "
+                "perimeter margin, at the chosen heading. Every line is the same length — "
+                "mow the lawn.\n\n"
+                "OFF: clip the lines to the padded target outline instead. Covers less "
+                "ground, but line lengths vary badly — 2.8 / 21 / 2.8 km on the default "
+                "area.\n\n"
+                "Either way the perimeter margin still clears the boundary on all sides.")
 
-        ttk.Label(param_tab, text="Repeats (fly box N times):").grid(row=5, column=0, sticky="w", pady=5)
+        repeats_label = ttk.Label(param_tab, text="Repeats (fly box N times):")
+        repeats_label.grid(row=5, column=0, sticky="w", pady=5)
         repeats_box = ttk.Combobox(param_tab, width=12, state="readonly",
                                    values=("1", "2", "3", "4"), textvariable=self.repeats)
         repeats_box.grid(row=5, column=1, sticky="w", pady=5, padx=10)
         repeats_box.bind("<<ComboboxSelected>>", lambda _e: self.calculate_and_render())
+        repeats_tip = ("How many times to fly the whole box.\n\n"
+                       "Each cycle repeats the same lines in the same directions, so sensor "
+                       "geometry matches between cycles. Line numbering continues across "
+                       "them — 3 lines flown twice gives 1L1S through 1L6F — so every "
+                       "waypoint name stays unique and in flight order.\n\n"
+                       "The transit back to line 1 carries no waypoint.")
+        ToolTip(repeats_box, repeats_tip)
+        ToolTip(repeats_label, repeats_tip)
 
         fields = [
             ("Groundspeed (knots):", "groundspeed_kt", "200"),
@@ -476,10 +557,26 @@ class FlightPlannerGUI(tk.Tk):
         ttk.Button(preview_header, text="Show Export Files",
                    command=self._open_export_folder).pack(side=tk.RIGHT, padx=(0, 8))
         # View-only toggles: they redraw from cached geometry, they do not recalculate.
-        ttk.Checkbutton(preview_header, text="Boundary labels", variable=self.show_boundary_labels,
-                        command=self._draw_preview).pack(side=tk.RIGHT, padx=(0, 14))
-        ttk.Checkbutton(preview_header, text="Waypoint labels", variable=self.show_waypoint_labels,
-                        command=self._draw_preview).pack(side=tk.RIGHT, padx=(0, 14))
+        boundary_check = ttk.Checkbutton(preview_header, text="Boundary labels",
+                                         variable=self.show_boundary_labels,
+                                         command=self._draw_preview)
+        boundary_check.pack(side=tk.RIGHT, padx=(0, 14))
+        ToolTip(boundary_check,
+                "Show the names of your own boundary points — the purple markers.\n\n"
+                "These are usually the longest labels, so they crowd the pane first. The "
+                "markers stay visible either way.\n\n"
+                "Display only: never changes the exported files.")
+
+        waypoint_check = ttk.Checkbutton(preview_header, text="Waypoint labels",
+                                         variable=self.show_waypoint_labels,
+                                         command=self._draw_preview)
+        waypoint_check.pack(side=tk.RIGHT, padx=(0, 14))
+        ToolTip(waypoint_check,
+                "Show the exported waypoint names (1L1S, 1L1F, …) at each line end, so the "
+                "preview can be read against the CSVs.\n\n"
+                "Turn off when a dense survey crowds the pane — at 0.75 km swath there are "
+                "56 waypoints and only ~37 labels fit. The red dots stay either way.\n\n"
+                "Display only: never changes the exported files.")
 
         self.preview_canvas = tk.Canvas(right_frame, bg="white", highlightthickness=0)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)

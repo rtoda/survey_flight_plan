@@ -124,6 +124,11 @@ Tkinter canvas primitives specifically to avoid adding them — don't reach for 
   counter so a repeat click is visibly registered.
 - The label checkboxes are view-only: they call `_draw_preview` off cached geometry and
   must not trigger a recalculation or rewrite the CSVs.
+- `ToolTip` gives hover help (Tkinter has none built in). It binds with `add="+"` so it
+  cannot displace a widget's existing `command`/handler — keep that if you extend it. All
+  three checkboxes and the Repeats dropdown carry one; the text explains the *trade-off*,
+  not the label. `_show` re-checks `winfo_exists()` because a pending `after` can fire
+  after the widget is gone.
 
 ## Verification habits that have paid off here
 
