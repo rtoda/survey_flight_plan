@@ -523,28 +523,42 @@ class FlightPlannerGUI(tk.Tk):
         clear_btn = ttk.Button(coords_tab, text="Clear All GPS Fields", command=self._clear_gps_fields)
         clear_btn.grid(row=12, column=1, columnspan=3, pady=5, sticky="ew")
 
-        # Save/Load so a set of points never has to be retyped
-        area_btns = ttk.Frame(coords_tab)
-        area_btns.grid(row=13, column=0, columnspan=4, pady=(8, 0), sticky="ew")
-        ttk.Button(area_btns, text="Save Area…", command=self._save_area).pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ttk.Button(area_btns, text="Load Area…", command=self._load_area).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 0))
+        # --- AREA SAVE / LOAD ---
+        # On the common pane rather than inside a tab: these act on the whole area
+        # definition (points AND parameters), not just the coordinate grid.
+        area_btns = ttk.Frame(left_frame)
+        area_btns.grid(row=1, column=0, columnspan=2, sticky="ew")
+        save_btn = ttk.Button(area_btns, text="Save Area…", command=self._save_area)
+        save_btn.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        load_btn = ttk.Button(area_btns, text="Load Area…", command=self._load_area)
+        load_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 0))
+        ToolTip(save_btn,
+                "Write the whole area definition to a .json file — boundary points, "
+                "waypoint labels, and every flight parameter including the Rectangular Box "
+                "and Repeats settings.\n\n"
+                "Each run also drops a copy beside its outputs, so any past output folder "
+                "can be reloaded as-is.")
+        ToolTip(load_btn,
+                "Read an area definition back in, so a set of points never has to be "
+                "retyped, then regenerate immediately.\n\n"
+                "A malformed file is rejected whole rather than half-applied.")
 
         # --- RUN CONTROL BUTTON ---
         calculate_btn = ttk.Button(left_frame, text="Generate Flight Plan & Update Map", command=self.calculate_and_render)
-        calculate_btn.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
+        calculate_btn.grid(row=2, column=0, columnspan=2, pady=10, sticky="ew")
 
         # Visible confirmation that a click was handled, even when the inputs are unchanged.
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(left_frame, textvariable=self.status_var, foreground="#0b6b3a", wraplength=330,
-                  justify=tk.LEFT).grid(row=2, column=0, columnspan=2, sticky="w")
+                  justify=tk.LEFT).grid(row=3, column=0, columnspan=2, sticky="w")
 
         # --- FLIGHT STATISTICS WINDOW ---
-        ttk.Label(left_frame, text="Flight Path Summary Output", font=("Helvetica", 10, "bold")).grid(row=3, column=0, columnspan=2, pady=(10, 2), sticky="w")
+        ttk.Label(left_frame, text="Flight Path Summary Output", font=("Helvetica", 10, "bold")).grid(row=4, column=0, columnspan=2, pady=(10, 2), sticky="w")
         self.stats_text = tk.Text(left_frame, width=45, height=15, wrap=tk.WORD, font=("Courier", 11))
-        self.stats_text.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=5)
+        self.stats_text.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=5)
 
         left_frame.columnconfigure(0, weight=1)
-        left_frame.rowconfigure(4, weight=1)
+        left_frame.rowconfigure(5, weight=1)
 
         # --- FLIGHT PATH PREVIEW ---
         # Drawn on a native Tk canvas: the Folium map is Leaflet/JavaScript, which the
