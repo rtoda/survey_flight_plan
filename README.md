@@ -59,9 +59,9 @@ python airborne_survey_gui.py
 python airborne_survey_gui2.py
 ```
 
-Boundary points and flight parameters can be saved and reloaded with **Save Area…** /
-**Load Area…** on the Boundary GPS tab, so a set of points never has to be retyped. Every
-run also drops a `<AREA>_area.json` next to its outputs, so any past output folder can be
+Boundary points and flight parameters can be saved and reloaded with **Save Plan…** /
+**Load Plan…**, above the generate button, so a set of points never has to be retyped. Every
+run also drops a `<AREA>_plan.json` next to its outputs, so any past output folder can be
 reloaded as-is.
 
 **Rectangular Box** (on by default) flies the smallest rectangle enclosing the target plus
@@ -88,7 +88,7 @@ Outputs are created in a per-area folder, `./<AREA>/`:
 - `<AREA>_foreflight_pack.zip` — ForeFlight **content pack** bundling the overlay *and* a
   correctly-named `user_waypoints.csv`. This is the one to send the pilot: he gets the same
   overlay plus real waypoints he can build a route from and override.
-- `<AREA>_area.json` — the boundary points and parameters that produced all of the above
+- `<AREA>_plan.json` — the saved plan (boundary points and parameters) that produced all of the above
 
 Use **Show Export Files** in the app to open the folder for AirDropping.
 
@@ -96,7 +96,9 @@ See [foreflight.md](foreflight.md) for the import rules these files are built ag
 including which claims are verified against ForeFlight's docs and which are not.
 
 ## Notes & Tips
-- Ensure the waypoint prefix is exactly 3 characters (the GUI enforces this).
+- **Line ID Prefix** is 1–4 letters or digits (default `1`). Waypoints come out as
+  `<prefix>L<n>S` / `<prefix>L<n>F` — Start and Finish of line n — matching the pilot's
+  `1L1S` convention. It is no longer a fixed 3-character prefix.
 - Provide at least 3 boundary points to define the survey polygon.
 - The GUI runs one calculation at startup, so the preview and CSVs already exist before you
   click anything. The status line under the button stamps each run so repeat clicks are visible.

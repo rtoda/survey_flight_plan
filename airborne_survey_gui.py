@@ -528,19 +528,19 @@ class FlightPlannerGUI(tk.Tk):
         # definition (points AND parameters), not just the coordinate grid.
         area_btns = ttk.Frame(left_frame)
         area_btns.grid(row=1, column=0, columnspan=2, sticky="ew")
-        save_btn = ttk.Button(area_btns, text="Save Area…", command=self._save_area)
+        save_btn = ttk.Button(area_btns, text="Save Plan…", command=self._save_plan)
         save_btn.pack(side=tk.LEFT, expand=True, fill=tk.X)
-        load_btn = ttk.Button(area_btns, text="Load Area…", command=self._load_area)
+        load_btn = ttk.Button(area_btns, text="Load Plan…", command=self._load_plan)
         load_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 0))
         ToolTip(save_btn,
-                "Write the whole area definition to a .json file — boundary points, "
-                "waypoint labels, and every flight parameter including the Rectangular Box "
-                "and Repeats settings.\n\n"
+                "Write the whole plan to a .json file — boundary points, waypoint labels, "
+                "and every flight parameter including the Rectangular Box and Repeats "
+                "settings.\n\n"
                 "Each run also drops a copy beside its outputs, so any past output folder "
                 "can be reloaded as-is.")
         ToolTip(load_btn,
-                "Read an area definition back in, so a set of points never has to be "
-                "retyped, then regenerate immediately.\n\n"
+                "Read a saved plan back in, so a set of points never has to be retyped, "
+                "then regenerate immediately.\n\n"
                 "A malformed file is rejected whole rather than half-applied.")
 
         # --- RUN CONTROL BUTTON ---
@@ -768,18 +768,20 @@ class FlightPlannerGUI(tk.Tk):
             lon.delete(0, tk.END)
             lbl.delete(0, tk.END)
 
-    # --- AREA DEFINITION SAVE / LOAD -------------------------------------------------
+    # --- FLIGHT PLAN SAVE / LOAD -----------------------------------------------------
 
-    AREA_SCHEMA = "airborne_survey_area/1"
+    PLAN_SCHEMA = "airborne_survey_plan/1"
+    # Files written before the rename carry the old identifier; still accept them.
+    LEGACY_PLAN_SCHEMAS = ("airborne_survey_area/1",)
 
-    def _area_as_dict(self):
+    def _plan_as_dict(self):
         boundary = []
         for lat_entry, lon_entry, lbl_entry in self.coord_rows:
             lat, lon = lat_entry.get().strip(), lon_entry.get().strip()
             if lat or lon:
                 boundary.append({"lat": lat, "lon": lon, "label": lbl_entry.get().strip()})
         return {
-            "schema": self.AREA_SCHEMA,
+            "schema": self.PLAN_SCHEMA,
             "area_name": self.area_name_entry.get().strip(),
             "waypoint_prefix": self.prefix_entry.get().strip(),
             "saved_utc": time.strftime('%Y-%m-%d %H:%MZ', time.gmtime()),
@@ -790,12 +792,12 @@ class FlightPlannerGUI(tk.Tk):
             "boundary": boundary,
         }
 
-    def _apply_area_dict(self, data):
+    def _apply_plan_dict(self, data):
         if not isinstance(data, dict) or "boundary" not in data:
-            raise ValueError("Not an area file: no 'boundary' key.")
+            raise ValueError("Not a flight plan file: no 'boundary' key.")
         schema = data.get("schema")
-        if schema and schema != self.AREA_SCHEMA:
-            raise ValueError(f"Unsupported area schema {schema!r}; expected {self.AREA_SCHEMA!r}.")
+        if schema and schema != self.PLAN_SCHEMA and schema not in self.LEGACY_PLAN_SCHEMAS:
+            raise ValueError(f"Unsupported plan schema {schema!r}; expected {self.PLAN_SCHEMA!r}.")
 
         boundary = data["boundary"]
         if len(boundary) > len(self.coord_rows):
@@ -828,36 +830,36 @@ class FlightPlannerGUI(tk.Tk):
             row[1].insert(0, str(point.get("lon", "")))
             row[2].insert(0, str(point.get("label", "")))
 
-    def _save_area(self):
+    def _save_plan(self):
         area_name = self.area_name_entry.get().strip().replace(' ', '_') or "survey_area"
         path = filedialog.asksaveasfilename(
-            title="Save Area Definition", defaultextension=".json",
-            initialfile=f"{area_name}_area.json",
-            filetypes=[("Area definition", "*.json"), ("All files", "*.*")])
+            title="Save Flight Plan", defaultextension=".json",
+            initialfile=f"{area_name}_plan.json",
+            filetypes=[("Flight plan", "*.json"), ("All files", "*.*")])
         if not path:
             return
         try:
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump(self._area_as_dict(), f, indent=2)
+                json.dump(self._plan_as_dict(), f, indent=2)
         except OSError as err:
             messagebox.showerror("Save Failed", str(err))
             return
-        self.status_var.set(f"Saved area definition to {path}")
+        self.status_var.set(f"Saved plan to {path}")
 
-    def _load_area(self):
+    def _load_plan(self):
         path = filedialog.askopenfilename(
-            title="Load Area Definition",
-            filetypes=[("Area definition", "*.json"), ("All files", "*.*")])
+            title="Load Flight Plan",
+            filetypes=[("Flight plan", "*.json"), ("All files", "*.*")])
         if not path:
             return
         try:
             with open(path, encoding='utf-8') as f:
                 data = json.load(f)
-            self._apply_area_dict(data)
+            self._apply_plan_dict(data)
         except (OSError, ValueError, json.JSONDecodeError) as err:
             messagebox.showerror("Load Failed", f"{path}\n\n{err}")
             return
-        self.status_var.set(f"Loaded {os.path.basename(path)} — press Generate to rebuild.")
+        self.status_var.set(f"Loaded plan {os.path.basename(path)} — regenerating.")
         self.calculate_and_render()
 
     def _get_active_coordinates(self):
@@ -953,8 +955,8 @@ class FlightPlannerGUI(tk.Tk):
         out_dir = os.path.join(os.getcwd(), area_name)
         try:
             os.makedirs(out_dir, exist_ok=True)
-            with open(os.path.join(out_dir, f"{area_name}_area.json"), 'w', encoding='utf-8') as f:
-                json.dump(self._area_as_dict(), f, indent=2)
+            with open(os.path.join(out_dir, f"{area_name}_plan.json"), 'w', encoding='utf-8') as f:
+                json.dump(self._plan_as_dict(), f, indent=2)
         except OSError as err:
             messagebox.showerror("Output Folder Error", f"{out_dir}\n\n{err}")
             return

@@ -21,7 +21,7 @@ exports waypoints for ForeFlight and a Honeywell FMS.
 
 ## Export invariants
 
-Everything for a run lands in `./<AREA>/`, including `<AREA>_area.json` so the folder is
+Everything for a run lands in `./<AREA>/`, including `<AREA>_plan.json` so the folder is
 self-describing and reloadable.
 
 - Both waypoint CSVs are built to match **sample flight plans the pilot supplied** — that
@@ -58,7 +58,7 @@ sensor geometry are identical each cycle. Line numbering runs straight through �
 twice gives `1L1S`…`1L6F` — so names stay unique and in flight order. The transit back to
 line 1 is implicit in the polyline and carries no waypoint.
 
-Both controls are saved in `<AREA>_area.json` and round-trip; `repeats` is clamped to 1–4
+Both controls are saved in `<AREA>_plan.json` and round-trip; `repeats` is clamped to 1–4
 on load in case the file was hand-edited.
 
 ## Coverage geometry — the margin fix
@@ -109,14 +109,16 @@ Tkinter canvas primitives specifically to avoid adding them — don't reach for 
 - Geometry works in **UTM metres**, projected per-run from the boundary centroid. The
   preview draws in those metres so the aspect ratio stays true — never scale raw lat/lon
   to pixels.
-- `build_rectangular_pattern` reduces the boundary to a **rotated bounding rectangle**
-  (`rotated_poly.bounds`), so boundary *shape* is discarded and only extent along/across
-  the heading survives. Verified: a 40-vertex perimeter and its 12-point convex hull give
-  survey areas within 0.02%, and the box came out 4.06× the actual polygon area. Passes are
-  clipped against `rotated_rect`, not the true `rotated_poly` — pointing that intersection
-  at the polygon instead is what would make accurate perimeter data worth having.
+- In box mode (the default) boundary *shape* is discarded — only extent along and across
+  the heading matters. Verified: a 40-vertex perimeter and its 12-point convex hull give
+  survey areas within 0.02%. So a high-fidelity perimeter buys almost nothing here; the
+  convex hull is enough. Do **not** shortcut to 4 lat/lon corners though — an axis-aligned
+  lat/lon box is not the heading-rotated box, and it inflated area 57% and added a line.
 - The boundary grid is capped at **10 rows**, which is already too few for a real
   perimeter's convex hull (needed 12 in testing).
+- Waypoint naming is driven by `flown_segments`, which `build_rectangular_pattern` returns
+  **oriented along the direction each pass is flown** so the exporter can label the ends
+  Start/Finish without re-deriving the sequence. Keep that orientation if you touch it.
 - `_export_csv_files` returns the `(name, lat, lon)` list it writes, and the preview labels
   come from that same list — keep it that way so the pane can't disagree with the CSVs.
 - `__init__` calls `calculate_and_render()` once at startup, so output exists before the
