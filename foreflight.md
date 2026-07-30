@@ -184,6 +184,28 @@ Install via AirDrop, email, Safari download, custom URL scheme hyperlink, Finder
 (macOS 10.15+), iTunes (older macOS), or Cloud Documents (Essential tier and above). ⭐
 Installed packs appear under **More > Custom Content**. ⭐
 
+### Getting a pack onto the iPad from a Windows machine ⭐
+
+AirDrop and Finder do not exist on Windows, which removes the two routes ForeFlight's docs
+lean on. What is left: email, a Safari download, iTunes/Apple Devices file sharing, or cloud
+storage. Two traps, both hit in practice:
+
+1. **A single tap on the `.zip` extracts it.** ForeFlight's page is explicit: *"If you
+   single-tap on the Content Pack file it will uncompress; this is not what you want."*
+   You must **touch and hold** to get the pop-up menu. And do not unzip it yourself —
+   *"ForeFlight will do this for you."*
+2. **Share from the Files app, not from the cloud provider's app.** Sharing a zip straight
+   out of Google Drive does not offer ForeFlight. Save it to Files first (Drive's ⋮ → Send
+   a copy → Save to Files), or open the download link in Safari so it lands in
+   Files → Downloads.
+
+Then: Files → touch and hold the zip → **Share** → scroll the app row **right**, because
+the ForeFlight icon is often off-screen → **Copy to ForeFlight**.
+
+If ForeFlight never appears in that share sheet, email `<AREA>_survey.kmz` instead — KML/KMZ
+is directly emailable and gets the overlay in, at the cost of the waypoint CSV that only the
+pack can carry. iTunes/Apple Devices file sharing bypasses the share sheet entirely.
+
 A content pack is therefore the way to ship survey lines as an overlay *and* the waypoint
 CSV together in one AirDrop-able file.
 
