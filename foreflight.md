@@ -180,6 +180,14 @@ Optional `manifest.json` alongside them; **all fields optional** ⭐:
 
 Dates are ISO with a required `T`; append `Z` for Zulu. ⭐
 
+`version` and `name` are generated from the run's UTC timestamp — `version` as
+`YYYYMMDDHHMM` so it always increases, and the stamp repeated in `name` so two generations
+are distinguishable in the Custom Content list. Both were previously fixed (`version: 1`,
+`"<AREA> Survey"`), which risked a re-import being taken for the pack already installed and
+❓ left no way to tell which generation was loaded. Whether ForeFlight actually uses
+`version` to decide on replacement is not documented — the timestamp is cheap insurance
+either way.
+
 Install via AirDrop, email, Safari download, custom URL scheme hyperlink, Finder
 (macOS 10.15+), iTunes (older macOS), or Cloud Documents (Essential tier and above). ⭐
 Installed packs appear under **More > Custom Content**. ⭐

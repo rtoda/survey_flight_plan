@@ -1150,10 +1150,17 @@ class FlightPlannerGUI(tk.Tk):
         for name, lat, lon in waypoints:
             writer.writerow([name, f'{area_name} {generated_utc}', f'{lat:.4f}', f'{lon:.4f}'])
 
+        # ForeFlight uses the manifest to identify pack versions, so a hardcoded version
+        # meant every regeneration claimed to be the same pack -- a re-import could be
+        # treated as already-installed and silently ignored, leaving yesterday's lines
+        # loaded. Derive it from the generation time: YYYYMMDDHHMM, so it always increases.
+        # The name carries the stamp too, so two generations are distinguishable in the
+        # Custom Content list rather than both reading "<AREA> Survey".
+        pack_version = int(''.join(ch for ch in manifest_stamp if ch.isdigit())[:12])
         manifest = {
-            "name": f"{area_name} Survey",
+            "name": f"{area_name} Survey {generated_utc}",
             "abbreviation": waypoint_prefix,
-            "version": 1,
+            "version": pack_version,
             "effectiveDate": manifest_stamp,
         }
 
