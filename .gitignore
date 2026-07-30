@@ -15,6 +15,9 @@ CLAUDE.md
 # exporters are built against and the format tests diff against. Tracked deliberately,
 # so exempt from the blanket *.csv rule above.
 !golden_csv/*.csv
+
+# docs/ holds images the README embeds, so they must survive a clone.
+!docs/*.png
 .vscode/
 *.DS_Store
 

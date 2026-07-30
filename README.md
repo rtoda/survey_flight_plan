@@ -1,6 +1,13 @@
 # Airborne Survey Flight Planner
 
-A small GUI toolset to generate airborne survey flight paths and export waypoints for ForeFlight and Honeywell FMS. The repo includes two Tkinter-based GUIs: `airborne_survey_gui.py` and `airborne_survey_gui2.py`.
+A Tkinter GUI that generates airborne survey flight patterns over a fire or target area and
+exports waypoints for ForeFlight and a Honeywell FMS.
+
+![The planner: parameters and boundary points on the left, scaled flight-path preview on the right](docs/screenshot.png)
+
+The preview above is the default area at heading 000: three equal-length survey lines,
+waypoints labelled with the names written to the CSVs, and the summary panel confirming the
+5.00 km perimeter margin was actually achieved on all sides.
 
 ## Features
 - Interactive Tkinter GUI to define survey boundary points and flight parameters
@@ -8,7 +15,8 @@ A small GUI toolset to generate airborne survey flight paths and export waypoint
 - Exports two CSV formats: ForeFlight-friendly and Honeywell-friendly
 - Draws a scaled flight-path preview directly in the window (native Tk canvas — no browser engine needed)
 - Saves an interactive Folium HTML map, opened on demand via **Open Interactive Map in Browser**
-- `airborne_survey_gui2.py` additionally generates a ForeFlight QR link for iPad transfer
+- Exports a KML/KMZ map layer and a ForeFlight content pack for getting the pattern onto an iPad
+- Saves and reloads a whole plan — boundary points and every parameter — as JSON
 
 ## Layout
 - `airborne_survey_gui.py` — main GUI (scaled path preview drawn in-window; Folium map opens in a browser)
@@ -108,10 +116,18 @@ including which claims are verified against ForeFlight's docs and which are not.
 - The GUI runs one calculation at startup, so the preview and CSVs already exist before you
   click anything. The status line under the button stamps each run so repeat clicks are visible.
 - Tile-backed maps need real JavaScript; use **Open Interactive Map in Browser** for that view.
-- The QR workflow embeds a `foreflightmobile://` link which opens ForeFlight on an iPad when scanned.
+- `notebooks/SendToForeFlight.ipynb` builds a `foreflightmobile://` route link and a QR code
+  from a generated ForeFlight CSV. It needs Pillow for the QR image.
 
-## Example
-Open `airborne_survey_gui2.py`, fill coordinates and parameters, then click `Generate Flight Plan`. The right panel will show a QR code and the file registry will list the produced CSV and HTML files.
+## Getting a plan onto the iPad from Windows
+AirDrop does not exist on Windows, so email the content pack to yourself or put it in cloud
+storage, then **save it into the Files app** — sharing a zip straight out of the Google Drive
+app does not offer ForeFlight. In Files, **touch and hold** the zip (a single tap extracts
+it, which is not what you want), then **Share** → scroll the app row right → **Copy to
+ForeFlight**. It lands under **More > Custom Content**.
+
+Full detail, including what is verified against ForeFlight's docs and what is not, is in
+[foreflight.md](foreflight.md).
 
 ## License
 Add your preferred license here.
