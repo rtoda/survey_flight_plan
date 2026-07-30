@@ -21,12 +21,22 @@ import folium
 
 # --- SURVEY ENGINE CONFIGURATION & HELPERS ---
 
-def dd_to_honeywell_format(value, positive_indicator, negative_indicator):
+def dd_to_honeywell_format(value, positive_indicator, negative_indicator, degree_digits=2):
+    """Degrees + decimal minutes, matching the FMS sample the pilot supplied exactly.
+
+    Sample rows are `N 36 44.53` and `W 076 38.02`: latitude degrees are 2 digits,
+    longitude degrees are 3 and zero padded, minutes are 2 decimals zero padded, and there
+    is NO trailing space (this used to emit one, e.g. `N 43 36.77 `).
+    """
     sign = positive_indicator if value >= 0 else negative_indicator
     abs_value = abs(value)
     degrees = int(abs_value)
     minutes = (abs_value - degrees) * 60.0
-    return f"{sign} {degrees:02d} {minutes:05.2f} "
+    # Without this, minutes of 59.996+ would format as "60.00" rather than rolling over.
+    if round(minutes, 2) >= 60.0:
+        degrees += 1
+        minutes = 0.0
+    return f"{sign} {degrees:0{degree_digits}d} {minutes:05.2f}"
 
 def summarize_segment_travel(flight_pattern, groundspeed_kt=200.0):
     coords = list(flight_pattern.coords)
@@ -149,22 +159,29 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
         reverse = row_idx % 2 == 1
         ordered = list(reversed(row_segments)) if reverse else row_segments
         for segment in ordered:
-            coords = sorted(segment.coords, key=lambda c: c[0])
+            # Orient each pass along the direction it is actually flown, so the exporter
+            # can name its ends Start and Finish without re-deriving the sequence.
+            oriented = sorted(segment.coords, key=lambda c: c[0])
             if reverse:
-                coords = coords[::-1]
+                oriented = oriented[::-1]
+            pass_segments.append(LineString(oriented))
+
+            coords = oriented
             # The turn onto the next pass is implicit in the polyline; only guard against
             # emitting a duplicate point (which would create a zero-length segment).
             if pattern_points and pattern_points[-1] == coords[0]:
                 coords = coords[1:]
             pattern_points.extend(coords)
-            pass_segments.append(segment)
 
     if len(pattern_points) < 2:
         raise ValueError('Survey area is too small for the configured swath width.')
 
     pattern_line = LineString(pattern_points)
     rotated_pattern = affinity.rotate(pattern_line, heading_angle_deg, origin=pivot, use_radians=False)
-    return coverage, rotated_pattern, pass_segments
+    # Segments come back in the un-rotated frame too, so their coordinates are usable.
+    flown_segments = [affinity.rotate(seg, heading_angle_deg, origin=pivot, use_radians=False)
+                      for seg in pass_segments]
+    return coverage, rotated_pattern, flown_segments
 
 # --- FOREFLIGHT KML / CONTENT PACK EXPORT ---
 #
@@ -332,9 +349,11 @@ class FlightPlannerGUI(tk.Tk):
         self.area_name_entry.insert(0, "Clairmont_Fire")
         self.area_name_entry.grid(row=1, column=1, sticky="w", pady=5, padx=10)
 
-        ttk.Label(param_tab, text="Waypoint Prefix (3-Char):").grid(row=2, column=0, sticky="w", pady=5)
+        # Waypoints come out as <prefix>L<n>S / <prefix>L<n>F, so "1" gives the pilot's
+        # 1L1S / 1L1F convention. Not a 3-character prefix any more.
+        ttk.Label(param_tab, text="Line ID Prefix:").grid(row=2, column=0, sticky="w", pady=5)
         self.prefix_entry = ttk.Entry(param_tab, width=10)
-        self.prefix_entry.insert(0, "CLM")
+        self.prefix_entry.insert(0, "1")
         self.prefix_entry.grid(row=2, column=1, sticky="w", pady=5, padx=10)
 
         ttk.Separator(param_tab, orient='horizontal').grid(row=3, column=0, columnspan=2, sticky="ew", pady=10)
@@ -710,8 +729,11 @@ class FlightPlannerGUI(tk.Tk):
         if not area_name:
             messagebox.showerror("Input Error", "Filename/Area Name cannot be empty.")
             return
-        if len(waypoint_prefix) != 3:
-            messagebox.showerror("Input Error", "Waypoint Prefix must be exactly 3 characters.")
+        # Names are built as <prefix>L<n>S, so the L and S/F already satisfy ForeFlight's
+        # "at least 3 characters including a letter, no spaces" rule for any short prefix.
+        if not waypoint_prefix or not waypoint_prefix.isalnum() or len(waypoint_prefix) > 4:
+            messagebox.showerror("Input Error",
+                                 "Line ID Prefix must be 1-4 letters or digits (e.g. '1').")
             return
 
         # 2. Harvest & Validate Coordinates from GPS list
@@ -775,7 +797,7 @@ class FlightPlannerGUI(tk.Tk):
         self._output_dir = out_dir
 
         ff_file, hw_file, waypoints = self._export_csv_files(
-            survey_pattern, xy_to_latlon, area_name, waypoint_prefix, out_dir)
+            segments, xy_to_latlon, area_name, waypoint_prefix, out_dir)
 
         # 7. Parse and Print Diagnostics Panel
         self.stats_text.delete("1.0", tk.END)
@@ -882,32 +904,39 @@ class FlightPlannerGUI(tk.Tk):
             f"Send {os.path.basename(pack_file)} to the pilot."
         )
 
-    def _export_csv_files(self, flight_pattern, conversion_func, area_name, waypoint_prefix, out_dir):
-        latlon_points = conversion_func(list(flight_pattern.coords))
-        deduped = []
-        for point in latlon_points:
-            if not deduped or deduped[-1] != point:
-                deduped.append(point)
+    def _export_csv_files(self, flown_segments, conversion_func, area_name, line_prefix, out_dir):
+        """Write both flight-plan CSVs in the exact formats the pilot supplied samples for.
 
+        Waypoints are named per survey line as <prefix>L<n>S / <prefix>L<n>F -- Start and
+        Finish of line n -- matching the pilot's `1L1S` / `1L1F` convention. Turns between
+        lines carry no waypoint, exactly as in his samples. Each named pair brackets one
+        straight run, so a concave area that splits a row into two runs numbers them as
+        separate lines rather than producing an ambiguous name.
+        """
         # Single source of truth for waypoint names: whatever gets written here is what
-        # the preview labels, so the pane can never disagree with the exported files.
-        waypoints = [(waypoint_prefix + f'{idx:02d}', lat, lon)
-                     for idx, (lat, lon) in enumerate(deduped, start=1)]
+        # the preview labels and the KML use, so they cannot disagree with these files.
+        waypoints = []
+        for idx, segment in enumerate(flown_segments, start=1):
+            ends = conversion_func([segment.coords[0], segment.coords[-1]])
+            (start_lat, start_lon), (end_lat, end_lon) = ends
+            waypoints.append((f"{line_prefix}L{idx}S", start_lat, start_lon))
+            waypoints.append((f"{line_prefix}L{idx}F", end_lat, end_lon))
 
+        # Pilot's sample carries 7-8 decimals; 4 was ~11 m of avoidable rounding.
         ff_file = os.path.join(out_dir, f"{area_name}_waypoints_foreflight.csv")
         with open(ff_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['Waypoint', 'Description', 'LAT', 'LONG'])
             for name, lat, lon in waypoints:
-                writer.writerow([name, 'NA', f'{lat:.4f}', f'{lon:.4f}'])
+                writer.writerow([name, 'NA', f'{lat:.8f}', f'{lon:.8f}'])
 
         hw_file = os.path.join(out_dir, f"{area_name}_waypoints_honeywell.csv")
         with open(hw_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['E', 'WPT', 'FIX', 'LAT', 'LON'])
             for name, lat, lon in waypoints:
-                lat_fmt = dd_to_honeywell_format(lat, 'N', 'S')
-                lon_fmt = dd_to_honeywell_format(lon, 'E', 'W')
+                lat_fmt = dd_to_honeywell_format(lat, 'N', 'S', degree_digits=2)
+                lon_fmt = dd_to_honeywell_format(lon, 'E', 'W', degree_digits=3)
                 writer.writerow(['X', name, 'NA', lat_fmt, lon_fmt])
 
         return ff_file, hw_file, waypoints

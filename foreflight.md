@@ -3,14 +3,70 @@
 Notes gathered from ForeFlight's own documentation on 2026-07-29, for getting survey
 flight lines and fire/custom points onto an iPad.
 
-**Confidence marking:** ⭐ = read directly off a ForeFlight page (see Sources).
-⚠ = seen only in a search-engine summary of a ForeFlight page, not confirmed on the page
-itself. ❓ = not found; treat as unknown.
+**Confidence marking:** ✈ = matched against a working flight-plan file the pilot supplied —
+**the highest authority here, since it is what actually gets loaded and flown.**
+⭐ = read directly off a ForeFlight page (see Sources). ⚠ = seen only in a search-engine
+summary of a ForeFlight page, not confirmed on the page itself. ❓ = not found; unknown.
 
 `support.foreflight.com/hc/...` returns **HTTP 403** to automated fetching. The
 `foreflight.com/support/...` pages are readable and cover the same ground — start there.
 
 ---
+
+## ✈ The formats the pilot actually flies
+
+Taken from two sample flight plans he supplied (`GIII FireSense sample Honeywell FP.csv`
+and `... ForeFlight FP.csv`, originals under `E:\CFIRST\`). His words: *"coordinate formats
+I need each time we go flying"* — so these override anything inferred from the web docs.
+The exporter is built to match them and a test asserts each rule below.
+
+The two samples are unrelated missions (one off the Carolina coast, one in Utah); they
+demonstrate format, not content.
+
+### Waypoint naming — `1L1S` / `1L1F`
+
+`<block>L<line><S|F>`: **S**tart and **F**inish of each survey line. Two waypoints per
+line, and **no waypoint on the turns** between lines. That is what makes the plan readable
+from the operator seat — you know you are on line 3 running to its finish, not staring at
+`CLM06`.
+
+We emit `<Line ID Prefix>L<n>S` / `...F`, prefix defaulting to `1`. A concave area that
+splits one pass row into two straight runs numbers them as separate lines, so a name always
+brackets exactly one straight run.
+
+### Honeywell FMS CSV
+
+```
+E,WPT,FIX,LAT,LON
+X,1L1S,NA,N 36 44.53,W 076 38.02
+X,1L1F,NA,N 35 26.62,W 076 29.63
+```
+
+- Column 1 is a literal `X` and the FMS **ignores it**.
+- `FIX` is `NA`.
+- Latitude: sign, space, **2-digit** degrees, space, minutes to 2 dp, zero padded.
+- Longitude: sign, space, **3-digit zero-padded** degrees (`076`, not `76`), same minutes.
+- **No trailing whitespace.** We used to emit `N 43 36.77 ` with a trailing space.
+- Precision ceiling is inherent: 0.01 minute ≈ **18.5 m**. Nothing to fix — it is the
+  format the box takes.
+
+### ForeFlight CSV
+
+```
+Waypoint,Description,LAT,LONG
+1L1S,NA,38.41664435,-112.5471749
+```
+
+- Header matches what we already wrote.
+- `Description` is **`NA`** in his working file — so ForeFlight's own suggestion of `""`
+  for an empty description is not a requirement, and our `NA` was right all along.
+- Coordinates carry **7–8 decimal places**. We were writing 4 (≈11 m of needless
+  rounding); now 8.
+- Filename in his workflow is descriptive, not `user_waypoints.csv` — he is presumably
+  importing by a route that tolerates it, or renaming. We still put the exactly-named copy
+  in the content pack.
+
+He also asked directly for a KML of the pattern, which the layer export covers.
 
 ## The distinction that matters
 
@@ -174,17 +230,17 @@ coordinates are emitted `lon,lat`, and that every waypoint name is all-caps / no
 
 ### Still not addressed
 
-1. **The legacy `<AREA>_waypoints_foreflight.csv` keeps its old name** and therefore still
-   will not import directly. It is left alone deliberately — the correctly-named copy lives
-   inside the content pack. Its `Description` column is still `NA` where the docs suggest
-   `""`.
+1. **The `<AREA>_waypoints_foreflight.csv` keeps its descriptive name**, matching the
+   pilot's own workflow; the exactly-named `user_waypoints.csv` copy lives inside the
+   content pack for the documented import route.
 2. **Elevation column is unused** in both CSVs. Adding it would improve flight-plan accuracy
-   and enable Profile View — relevant for a survey flown at fixed altitude.
-3. **Waypoint names were already correct.** `CLM01` satisfies all-caps, ≥3 chars, ≥1 letter,
-   no spaces. (An earlier search summary claiming names must be *lowercase* is contradicted
-   by two directly-fetched pages.)
-4. `SendToForeFlight.ipynb` still has its own separate `foreflightmobile://maps/search?q=`
+   and enable Profile View — relevant for a survey flown at fixed altitude. The pilot's
+   samples do not use it either.
+3. `SendToForeFlight.ipynb` still has its own separate `foreflightmobile://maps/search?q=`
    route URL path, untouched by any of this.
+4. ❓ Whether the pilot's FMS cares that a survey line's Start/Finish pair are consecutive
+   waypoints with no turn fix between them over a long transit. His samples do it, so
+   presumably not.
 
 ## KML gotchas worth remembering
 
@@ -200,12 +256,22 @@ coordinates are emitted `lon,lat`, and that every waypoint name is all-caps / no
 
 ## Open questions
 
-- ❓ Whether a header row is *actually* skipped, or parsed as a waypoint.
+- ❓ Whether a header row is *actually* skipped, or parsed as a waypoint. (The pilot's
+  samples both carry one, so it is evidently tolerated on his import path.)
 - ❓ Real KML/KMZ size limits.
 - ❓ Max user waypoint count.
-- ❓ Whether `Description` length is a hard limit or just a display truncation.
 - ❓ Which plan tier statement governs, given the two pages differ.
 - ❓ Whether Watch Duty exposes any public perimeter data (not investigated).
+
+## Sources beyond the web docs
+
+- `E:\CFIRST\GIII FireSense sample Honeywell FP.csv`
+- `E:\CFIRST\GIII FireSense sample ForeFlight FP.csv`
+
+Not copied into the repo — they hold real mission coordinates and only the format is
+needed. `E:` was not reachable from the tooling shell, so the format above was transcribed
+from the file contents rather than diffed against the originals; re-check byte-for-byte if
+an import ever misbehaves.
 
 ## Sources
 

@@ -24,6 +24,15 @@ exports waypoints for ForeFlight and a Honeywell FMS.
 Everything for a run lands in `./<AREA>/`, including `<AREA>_area.json` so the folder is
 self-describing and reloadable.
 
+- Both waypoint CSVs are built to match **sample flight plans the pilot supplied** — that
+  is the authority, above ForeFlight's web docs. See the ✈ section of foreflight.md. Tests
+  assert each rule; do not "tidy" these formats:
+  - Waypoints are named `<prefix>L<n>S` / `<prefix>L<n>F` (Start/Finish of line n), two per
+    line, **no waypoint on the turns**. This replaced sequential `CLM01…` naming.
+  - Honeywell latitude degrees are 2 digits, **longitude degrees 3 and zero-padded**, and
+    there is **no trailing whitespace** (a trailing space used to be emitted).
+  - ForeFlight coordinates carry 8 decimals, and `Description` is `NA` — his working file
+    uses `NA`, so ForeFlight's `""` suggestion is not binding.
 - `navdata/user_waypoints.csv` inside the content pack **must keep that exact filename**;
   ForeFlight will not recognise it otherwise, and it fails silently rather than erroring.
 - `build_survey_kml` must emit only elements from ForeFlight's documented subset. A test
