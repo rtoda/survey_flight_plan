@@ -485,7 +485,7 @@ class FlightPlannerGUI(tk.Tk):
             ("Swath Width (km):", "swath_width_km", "10.0"),
             ("Swath Overlap (0.0-1.0):", "swath_overlap", "0.1"),
             ("Perimeter Margin (km):", "perimeter_margin_km", "5.0"),
-            ("Initial Heading (deg True):", "initial_heading_deg", "20"),
+            ("Initial Heading (deg True):", "initial_heading_deg", "0"),
             # Offsets shift the whole coverage area, which eats into the perimeter margin
             # on the trailing side. Default to no shift so the requested padding actually
             # holds on all sides; the summary panel reports the padding achieved.
