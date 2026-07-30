@@ -10,9 +10,15 @@ A small GUI toolset to generate airborne survey flight paths and export waypoint
 - Saves an interactive Folium HTML map, opened on demand via **Open Interactive Map in Browser**
 - `airborne_survey_gui2.py` additionally generates a ForeFlight QR link for iPad transfer
 
-## Files of interest
+## Layout
 - `airborne_survey_gui.py` — main GUI (scaled path preview drawn in-window; Folium map opens in a browser)
-- `airborne_survey_gui2.py` — GUI with QR code and separate HTML map backup
+- `notebooks/` — the original exploratory notebooks. Self-contained: they carry their own
+  copy of the geometry code and import nothing from the GUI, so fixes to the app do **not**
+  reach them. They write into `plans/<AREA>/` like the GUI does.
+- `golden_csv/` — the pilot's reference flight plans, the format specification both CSV
+  exporters are built against. Tracked deliberately, exempt from the `*.csv` ignore rule.
+- `plans/` — generated output, one directory per plan. Entirely git-ignored and regenerable.
+- `foreflight.md` — how ForeFlight ingests waypoints and overlays, with confidence markers
 - `requirements.txt` — pinned dependencies used by notebooks and scripts
 
 ## Dependencies
@@ -55,8 +61,6 @@ Run either GUI script and interactively enter boundary waypoints (minimum 3), se
 
 ```bash
 python airborne_survey_gui.py
-# or the QR-enabled variant
-python airborne_survey_gui2.py
 ```
 
 Boundary points and flight parameters can be saved and reloaded with **Save Plan…** /

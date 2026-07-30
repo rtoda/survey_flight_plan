@@ -10,6 +10,11 @@ plans/
 
 # Local working notes for Claude Code, deliberately not tracked.
 CLAUDE.md
+
+# golden_csv/ holds the pilot's reference flight plans -- the format specification the
+# exporters are built against and the format tests diff against. Tracked deliberately,
+# so exempt from the blanket *.csv rule above.
+!golden_csv/*.csv
 .vscode/
 *.DS_Store
 
