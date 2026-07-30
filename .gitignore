@@ -8,11 +8,8 @@
 # Generated flight plans: one directory per plan, all disposable output.
 plans/
 
-# ...but the pilot's sample flight plans ARE the format specification that
-# airborne_survey_gui.py is built against, and foreflight.md points at them, so they
-# have to survive a clone. Re-included despite the *.csv rule above.
-!GIII FireSense sample ForeFlight FP.csv
-!GIII FireSense sample Honeywell FP.csv
+# Local working notes for Claude Code, deliberately not tracked.
+CLAUDE.md
 .vscode/
 *.DS_Store
 

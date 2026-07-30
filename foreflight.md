@@ -271,8 +271,14 @@ The pilot's two sample flight plans, in the **project root**:
 - `GIII FireSense sample Honeywell FP.csv`
 - `GIII FireSense sample ForeFlight FP.csv`
 
-Read these directly rather than trusting the transcription above. The Honeywell row
-skeleton was verified identical to ours, digit for digit:
+⚠ **Not in version control** — they hold real mission coordinates, so they are left out of
+the repo deliberately (the blanket `*.csv` ignore rule covers them). A fresh clone will not
+have them, and the format assertions that diff against them cannot run. If they are missing,
+the ✈ section above is the transcription to work from; get fresh copies from the pilot
+before changing an export format.
+
+Read these directly rather than trusting the transcription when they are present. The
+Honeywell row skeleton was verified identical to ours, digit for digit:
 
 ```
 pilot: X,#L#S,NA,N ## ##.##,W ### ##.##
