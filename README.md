@@ -61,8 +61,8 @@ python airborne_survey_gui2.py
 
 Boundary points and flight parameters can be saved and reloaded with **Save Plan…** /
 **Load Plan…**, above the generate button, so a set of points never has to be retyped. Every
-run also drops a `<AREA>_plan.json` next to its outputs, so any past output folder can be
-reloaded as-is.
+run also drops a `<AREA>_plan.json` next to its outputs, so any past plan folder can be
+reloaded as-is. The dialogs open on `plans/` by default.
 
 **Rectangular Box** (on by default) flies the smallest rectangle enclosing the target plus
 its perimeter margin, at the chosen heading — equal-length parallel lines, "mow the lawn".
@@ -77,7 +77,8 @@ padding clears the boundary on all sides at any heading. The summary panel repor
 padding actually achieved — trust that figure over the requested one, since a non-zero
 lat/lon offset shifts coverage and eats into it.
 
-Outputs are created in a per-area folder, `./<AREA>/`:
+Outputs are created in one directory per plan, `./plans/<AREA>/`. The whole `plans/` tree is
+git-ignored — it is all regenerable, so nothing there is precious:
 
 - `<AREA>_waypoints_foreflight.csv` — waypoint list in ForeFlight's column order
 - `<AREA>_waypoints_honeywell.csv` — Honeywell FMS formatted CSV

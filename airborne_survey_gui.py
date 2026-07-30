@@ -19,6 +19,10 @@ from shapely import affinity
 from pyproj import CRS, Transformer
 import folium
 
+# Generated output lives under here, one directory per named plan, so it never litters
+# the project root. Git-ignored wholesale.
+PLANS_DIR = "plans"
+
 # --- SURVEY ENGINE CONFIGURATION & HELPERS ---
 
 def dd_to_honeywell_format(value, positive_indicator, negative_indicator, degree_digits=2):
@@ -771,8 +775,6 @@ class FlightPlannerGUI(tk.Tk):
     # --- FLIGHT PLAN SAVE / LOAD -----------------------------------------------------
 
     PLAN_SCHEMA = "airborne_survey_plan/1"
-    # Files written before the rename carry the old identifier; still accept them.
-    LEGACY_PLAN_SCHEMAS = ("airborne_survey_area/1",)
 
     def _plan_as_dict(self):
         boundary = []
@@ -796,7 +798,7 @@ class FlightPlannerGUI(tk.Tk):
         if not isinstance(data, dict) or "boundary" not in data:
             raise ValueError("Not a flight plan file: no 'boundary' key.")
         schema = data.get("schema")
-        if schema and schema != self.PLAN_SCHEMA and schema not in self.LEGACY_PLAN_SCHEMAS:
+        if schema and schema != self.PLAN_SCHEMA:
             raise ValueError(f"Unsupported plan schema {schema!r}; expected {self.PLAN_SCHEMA!r}.")
 
         boundary = data["boundary"]
@@ -830,15 +832,26 @@ class FlightPlannerGUI(tk.Tk):
             row[1].insert(0, str(point.get("lon", "")))
             row[2].insert(0, str(point.get("label", "")))
 
+    def _plan_dialog_dir(self):
+        """Open the dialogs on this plan's own folder, falling back to plans/."""
+        area_name = self.area_name_entry.get().strip().replace(' ', '_')
+        for candidate in (os.path.join(os.getcwd(), PLANS_DIR, area_name) if area_name else None,
+                          os.path.join(os.getcwd(), PLANS_DIR)):
+            if candidate and os.path.isdir(candidate):
+                return candidate
+        return os.getcwd()
+
     def _save_plan(self):
         area_name = self.area_name_entry.get().strip().replace(' ', '_') or "survey_area"
         path = filedialog.asksaveasfilename(
             title="Save Flight Plan", defaultextension=".json",
+            initialdir=self._plan_dialog_dir(),
             initialfile=f"{area_name}_plan.json",
             filetypes=[("Flight plan", "*.json"), ("All files", "*.*")])
         if not path:
             return
         try:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(self._plan_as_dict(), f, indent=2)
         except OSError as err:
@@ -849,6 +862,7 @@ class FlightPlannerGUI(tk.Tk):
     def _load_plan(self):
         path = filedialog.askopenfilename(
             title="Load Flight Plan",
+            initialdir=self._plan_dialog_dir(),
             filetypes=[("Flight plan", "*.json"), ("All files", "*.*")])
         if not path:
             return
@@ -950,9 +964,9 @@ class FlightPlannerGUI(tk.Tk):
             messagebox.showerror("Execution Error", str(e))
             return
 
-        # 6. Every artefact for this area lands in its own folder, and the folder carries
-        #    the area definition so it can be reloaded without retyping the points.
-        out_dir = os.path.join(os.getcwd(), area_name)
+        # 6. Every artefact for this plan lands in plans/<name>/, and that folder carries
+        #    the plan itself so it can be reloaded without retyping the points.
+        out_dir = os.path.join(os.getcwd(), PLANS_DIR, area_name)
         try:
             os.makedirs(out_dir, exist_ok=True)
             with open(os.path.join(out_dir, f"{area_name}_plan.json"), 'w', encoding='utf-8') as f:
@@ -999,7 +1013,7 @@ class FlightPlannerGUI(tk.Tk):
             f"Survey Identifier: {area_name}",
             f"Prefix Configured: {waypoint_prefix}",
             f"Generated (UTC): {generated_utc}",
-            f"Output Folder: {area_name}{os.sep}",
+            f"Output Folder: {PLANS_DIR}{os.sep}{area_name}{os.sep}",
             f"Active Vertices parsed: {len(survey_boundary)}",
             f"Pattern: {'Rectangular box' if self.rectangular_box.get() else 'Clipped to target outline'}",
             f"Repeats: {repeats}x  ({len(segments) // repeats} lines per cycle)",
@@ -1066,7 +1080,8 @@ class FlightPlannerGUI(tk.Tk):
         self._run_count += 1
         short = clearance_m < margin * 1000.0 - 1.0
         self.status_var.set(
-            f"Generated {generated_utc} (run #{self._run_count}) into {area_name}{os.sep}: "
+            f"Generated {generated_utc} (run #{self._run_count}) into "
+            f"{PLANS_DIR}{os.sep}{area_name}{os.sep}: "
             f"{len(segments)} lines, {dist_nm:.1f} nm, "
             f"{clearance_m/1000:.2f} km padding{' (SHORT — check offsets)' if short else ''}. "
             f"Send {os.path.basename(pack_file)} to the pilot."
