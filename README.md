@@ -5,9 +5,10 @@ exports waypoints for ForeFlight and a Honeywell FMS.
 
 ![The planner: parameters and boundary points on the left, scaled flight-path preview on the right](docs/screenshot.png)
 
-The preview above is the default area at heading 000: three equal-length survey lines,
-waypoints labelled with the names written to the CSVs, and the summary panel confirming the
-5.00 km perimeter margin was actually achieved on all sides.
+Above: a 4 km swath at heading 045, giving five survey lines across a box rotated onto the
+diagonal. Every line is the same length, each end is labelled with the name written to the
+CSVs, and the summary panel confirms the requested 5.00 km perimeter margin was actually
+achieved on all sides.
 
 ## Features
 - Interactive Tkinter GUI to define survey boundary points and flight parameters
