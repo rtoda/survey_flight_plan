@@ -64,10 +64,18 @@ Boundary points and flight parameters can be saved and reloaded with **Save Area
 run also drops a `<AREA>_area.json` next to its outputs, so any past output folder can be
 reloaded as-is.
 
-The survey pattern is clipped to the target boundary **expanded by the perimeter margin**,
-so the requested padding holds on all sides at any heading, and no flying is wasted covering
-a bounding box. The summary panel reports the padding actually achieved — trust that figure
-over the requested one, since a non-zero lat/lon offset shifts coverage and eats into it.
+**Rectangular Box** (on by default) flies the smallest rectangle enclosing the target plus
+its perimeter margin, at the chosen heading — equal-length parallel lines, "mow the lawn".
+Unchecked, the passes are clipped to the padded target outline instead: less ground covered,
+but lines of very uneven length.
+
+**Repeats** (1–4) flies the whole box that many times, with identical line directions each
+cycle. Line numbering continues across cycles, so waypoint names stay unique.
+
+The perimeter margin is applied to the target before the box is taken, so the requested
+padding clears the boundary on all sides at any heading. The summary panel reports the
+padding actually achieved — trust that figure over the requested one, since a non-zero
+lat/lon offset shifts coverage and eats into it.
 
 Outputs are created in a per-area folder, `./<AREA>/`:
 

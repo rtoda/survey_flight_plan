@@ -88,7 +88,7 @@ def measure_clearance(target_poly, coverage_poly, samples=400):
     return 0.0 if worst is None else worst
 
 
-def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat):
+def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1):
     if len(latlon_coords) < 3:
         raise ValueError('At least three coordinates are required to define a survey area.')
 
@@ -128,6 +128,16 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
     rotated_coverage = affinity.rotate(coverage, -heading_angle_deg, origin=pivot, use_radians=False)
     minx, miny, maxx, maxy = rotated_coverage.bounds
 
+    if rectangular:
+        # "Mow the lawn": clip to the smallest rectangle enclosing the padded target at
+        # this heading, so every line runs the full width and they are all the same
+        # length. Clipping to the padded outline itself instead produces lines of wildly
+        # differing length -- 2.8 km / 21 km / 2.8 km on the default area, an hourglass
+        # that is minimal-area but not how a survey is actually flown.
+        clip_region = Polygon([(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)])
+    else:
+        clip_region = rotated_coverage
+
     center_y = (miny + maxy) / 2.0
     line_spacing = swath_km * 1000 * (1 - overlap)
     if line_spacing <= 0:
@@ -146,15 +156,14 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
     pass_rows = []
     for current_y in candidate_ys:
         pass_line = LineString([(minx - 10000, current_y), (maxx + 10000, current_y)])
-        segments = flatten_linestrings(pass_line.intersection(rotated_coverage))
+        segments = flatten_linestrings(pass_line.intersection(clip_region))
         if segments:
             pass_rows.append(sorted(segments, key=lambda s: s.centroid.x))
 
     if not pass_rows:
         raise ValueError('No pass segments could be generated. Adjust coordinates or swath width.')
 
-    pattern_points = []
-    pass_segments = []
+    cycle_segments = []
     for row_idx, row_segments in enumerate(pass_rows):
         reverse = row_idx % 2 == 1
         ordered = list(reversed(row_segments)) if reverse else row_segments
@@ -164,14 +173,22 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
             oriented = sorted(segment.coords, key=lambda c: c[0])
             if reverse:
                 oriented = oriented[::-1]
-            pass_segments.append(LineString(oriented))
+            cycle_segments.append(LineString(oriented))
 
-            coords = oriented
-            # The turn onto the next pass is implicit in the polyline; only guard against
-            # emitting a duplicate point (which would create a zero-length segment).
-            if pattern_points and pattern_points[-1] == coords[0]:
-                coords = coords[1:]
-            pattern_points.extend(coords)
+    # Repeats fly the whole box again from the top, so the line directions and sensor
+    # geometry of every cycle are identical. Line numbering runs straight on through, which
+    # keeps every waypoint name unique and in flight order.
+    pass_segments = cycle_segments * max(1, int(repeats))
+
+    pattern_points = []
+    for segment in pass_segments:
+        coords = list(segment.coords)
+        # The turn onto the next pass -- and the transit back to line 1 for a repeat -- is
+        # implicit in the polyline; only guard against emitting a duplicate point, which
+        # would create a zero-length segment.
+        if pattern_points and pattern_points[-1] == coords[0]:
+            coords = coords[1:]
+        pattern_points.extend(coords)
 
     if len(pattern_points) < 2:
         raise ValueError('Survey area is too small for the configured swath width.')
@@ -181,7 +198,10 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
     # Segments come back in the un-rotated frame too, so their coordinates are usable.
     flown_segments = [affinity.rotate(seg, heading_angle_deg, origin=pivot, use_radians=False)
                       for seg in pass_segments]
-    return coverage, rotated_pattern, flown_segments
+    # Report the region actually flown, so the preview, KML and clearance check all agree.
+    flown_region = affinity.rotate(clip_region, heading_angle_deg, origin=pivot,
+                                   use_radians=False) if rectangular else coverage
+    return flown_region, rotated_pattern, flown_segments
 
 # --- FOREFLIGHT KML / CONTENT PACK EXPORT ---
 #
@@ -314,6 +334,12 @@ class FlightPlannerGUI(tk.Tk):
         self.show_waypoint_labels = tk.BooleanVar(value=True)
         self.show_boundary_labels = tk.BooleanVar(value=True)
 
+        # Rectangular box on by default: survey flying is "mow the lawn", equal-length
+        # parallel lines. Unchecked clips the passes to the padded target outline instead,
+        # which covers less ground but gives lines of very uneven length.
+        self.rectangular_box = tk.BooleanVar(value=True)
+        self.repeats = tk.StringVar(value="1")
+
         self._setup_layout()
         self._load_defaults()
         self.calculate_and_render()
@@ -359,7 +385,16 @@ class FlightPlannerGUI(tk.Tk):
         ttk.Separator(param_tab, orient='horizontal').grid(row=3, column=0, columnspan=2, sticky="ew", pady=10)
 
         # Flight settings fields
-        ttk.Label(param_tab, text="Flight Parameters", font=("Helvetica", 10, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        ttk.Label(param_tab, text="Flight Parameters", font=("Helvetica", 10, "bold")).grid(row=4, column=0, sticky="w", pady=(0, 5))
+        ttk.Checkbutton(param_tab, text="Rectangular Box", variable=self.rectangular_box,
+                        command=self.calculate_and_render).grid(row=4, column=1, sticky="w", padx=10)
+
+        ttk.Label(param_tab, text="Repeats (fly box N times):").grid(row=5, column=0, sticky="w", pady=5)
+        repeats_box = ttk.Combobox(param_tab, width=12, state="readonly",
+                                   values=("1", "2", "3", "4"), textvariable=self.repeats)
+        repeats_box.grid(row=5, column=1, sticky="w", pady=5, padx=10)
+        repeats_box.bind("<<ComboboxSelected>>", lambda _e: self.calculate_and_render())
+
         fields = [
             ("Groundspeed (knots):", "groundspeed_kt", "200"),
             ("Swath Width (km):", "swath_width_km", "10.0"),
@@ -373,7 +408,7 @@ class FlightPlannerGUI(tk.Tk):
             ("Longitude Offset (deg):", "lon_offset", "0.0")
         ]
 
-        for i, (label_text, dict_key, default_val) in enumerate(fields, start=5):
+        for i, (label_text, dict_key, default_val) in enumerate(fields, start=6):
             ttk.Label(param_tab, text=label_text).grid(row=i, column=0, sticky="w", pady=5)
             entry = ttk.Entry(param_tab, width=15)
             entry.insert(0, default_val)
@@ -639,6 +674,8 @@ class FlightPlannerGUI(tk.Tk):
             "saved_utc": time.strftime('%Y-%m-%d %H:%MZ', time.gmtime()),
             # Stored as typed so a round-trip does not silently reformat "10.0" to "10".
             "parameters": {key: entry.get().strip() for key, entry in self.inputs.items()},
+            "rectangular_box": self.rectangular_box.get(),
+            "repeats": self.repeats.get(),
             "boundary": boundary,
         }
 
@@ -658,6 +695,14 @@ class FlightPlannerGUI(tk.Tk):
             if key in self.inputs:
                 self.inputs[key].delete(0, tk.END)
                 self.inputs[key].insert(0, str(value))
+
+        if "rectangular_box" in data:
+            self.rectangular_box.set(bool(data["rectangular_box"]))
+        if "repeats" in data:
+            try:
+                self.repeats.set(str(min(4, max(1, int(float(data["repeats"]))))))
+            except (TypeError, ValueError):
+                self.repeats.set("1")
 
         if data.get("area_name"):
             self.area_name_entry.delete(0, tk.END)
@@ -775,10 +820,18 @@ class FlightPlannerGUI(tk.Tk):
             messagebox.showerror("Input Error", "Ensure all Flight settings are valid numbers.")
             return
 
+        # Combobox is read-only so this only guards a hand-edited area file.
+        try:
+            repeats = min(4, max(1, int(float(self.repeats.get()))))
+        except ValueError:
+            repeats = 1
+        self.repeats.set(str(repeats))
+
         # 5. Generate the flight pattern path
         try:
             survey_poly, survey_pattern, segments = build_rectangular_pattern(
-                survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m, center_lat
+                survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m, center_lat,
+                rectangular=self.rectangular_box.get(), repeats=repeats
             )
         except Exception as e:
             messagebox.showerror("Execution Error", str(e))
@@ -835,6 +888,8 @@ class FlightPlannerGUI(tk.Tk):
             f"Generated (UTC): {generated_utc}",
             f"Output Folder: {area_name}{os.sep}",
             f"Active Vertices parsed: {len(survey_boundary)}",
+            f"Pattern: {'Rectangular box' if self.rectangular_box.get() else 'Clipped to target outline'}",
+            f"Repeats: {repeats}x  ({len(segments) // repeats} lines per cycle)",
             f"Generated Survey Lines: {len(segments)}",
             f"Ground Heading: {heading:.1f}° True",
             f"Requested Margin: {margin:.2f} km",

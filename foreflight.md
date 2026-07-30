@@ -15,10 +15,11 @@ summary of a ForeFlight page, not confirmed on the page itself. ❓ = not found;
 
 ## ✈ The formats the pilot actually flies
 
-Taken from two sample flight plans he supplied (`GIII FireSense sample Honeywell FP.csv`
-and `... ForeFlight FP.csv`, originals under `E:\CFIRST\`). His words: *"coordinate formats
-I need each time we go flying"* — so these override anything inferred from the web docs.
-The exporter is built to match them and a test asserts each rule below.
+Taken from two sample flight plans he supplied, both sitting in the project root:
+`GIII FireSense sample Honeywell FP.csv` and `GIII FireSense sample ForeFlight FP.csv`.
+His words: *"coordinate formats I need each time we go flying"* — so these override anything
+inferred from the web docs. The exporter is built to match them, and a test reads the real
+files and compares our rows against them structurally.
 
 The two samples are unrelated missions (one off the Carolina coast, one in Utah); they
 demonstrate format, not content.
@@ -265,13 +266,18 @@ coordinates are emitted `lon,lat`, and that every waypoint name is all-caps / no
 
 ## Sources beyond the web docs
 
-- `E:\CFIRST\GIII FireSense sample Honeywell FP.csv`
-- `E:\CFIRST\GIII FireSense sample ForeFlight FP.csv`
+The pilot's two sample flight plans, in the **project root**:
 
-Not copied into the repo — they hold real mission coordinates and only the format is
-needed. `E:` was not reachable from the tooling shell, so the format above was transcribed
-from the file contents rather than diffed against the originals; re-check byte-for-byte if
-an import ever misbehaves.
+- `GIII FireSense sample Honeywell FP.csv`
+- `GIII FireSense sample ForeFlight FP.csv`
+
+Read these directly rather than trusting the transcription above. The Honeywell row
+skeleton was verified identical to ours, digit for digit:
+
+```
+pilot: X,#L#S,NA,N ## ##.##,W ### ##.##
+ours:  X,#L#S,NA,N ## ##.##,W ### ##.##
+```
 
 ## Sources
 

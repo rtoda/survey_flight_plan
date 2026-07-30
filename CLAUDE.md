@@ -41,6 +41,26 @@ self-describing and reloadable.
   margin fix, which **deliberately moved every waypoint** (see below). The old coordinates
   are no longer the reference; regenerate a baseline before the next geometry change.
 
+## Pattern shape — "mow the lawn"
+
+**Survey flying means equal-length parallel lines.** The `Rectangular Box` checkbox is
+**on by default** and clips passes to the smallest rectangle enclosing the padded target at
+the requested heading: every line runs the full width, all the same length, spread 1.00× at
+every heading.
+
+Unchecking it clips to the padded target *outline* instead. That is minimum-area and covers
+less ground, but it produced lines of 2.84 / 20.95 / 2.84 km on the default area — a 7.4×
+spread, an hourglass with two useless stub lines. It is kept as an option, **not a default**.
+Do not make outline clipping the default again.
+
+`Repeats` (1–4, default 1) flies the whole box again from the top, so line directions and
+sensor geometry are identical each cycle. Line numbering runs straight through — 3 lines
+twice gives `1L1S`…`1L6F` — so names stay unique and in flight order. The transit back to
+line 1 is implicit in the polyline and carries no waypoint.
+
+Both controls are saved in `<AREA>_area.json` and round-trip; `repeats` is clamped to 1–4
+on load in case the file was hand-edited.
+
 ## Coverage geometry — the margin fix
 
 `perimeter_margin_km` used to be unreliable and heading-dependent. Two causes, both fixed:
@@ -52,18 +72,16 @@ self-describing and reloadable.
    only value that looked correct, because there the rotation angle is zero). All rotations
    in `build_rectangular_pattern` now share one explicit `pivot`. **Do not reintroduce
    `origin='centroid'` there** — it re-evaluates per geometry, which is the bug.
-2. **Box clipping.** Passes were clipped to the rotated bounding box, which overshoots the
-   target badly on some sides (measured 1.46× the buffered area). They are now clipped to
-   `target_poly.buffer(margin)` itself, so the padding holds on every side at every heading.
-   `buffer()` is called with `quad_segs=64` because the default 8 inscribes the arc and
+2. **What gets padded.** The margin is applied by buffering the *target*, and the clip
+   region is derived from that buffered shape — so the padding is baked in before the
+   rectangle is taken, and the box therefore clears the target by at least the margin on
+   every side. `buffer()` uses `quad_segs=64` because the default 8 inscribes the arc and
    lands ~10 m *inside* the requested margin.
 
 Consequences to keep in mind:
 
-- Coverage is now 1.00× the buffered target and the default plan is **26.9 nm instead of
-  44.0 nm** — same coverage, a third less flying. Waypoint coordinates changed accordingly.
-- The returned first value is now the **buffered coverage polygon**, not a rectangle, so it
-  has hundreds of vertices (261 on the default area). Display code must not assume 5.
+- The returned first value is the **region actually flown** — a rectangle in box mode, the
+  buffered outline (hundreds of vertices) otherwise. Display code must not assume either.
 - A concave boundary can split a pass row into several segments, so rows are grouped and
   sequenced per row rather than by sorting a flat segment list.
 - `measure_clearance()` samples the target outline and reports the padding actually
