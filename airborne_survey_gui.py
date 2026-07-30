@@ -306,6 +306,23 @@ def build_survey_kml(area_name, envelope_latlon, track_latlon, waypoints, bounda
     return out.getvalue()
 
 
+def build_foreflight_route(waypoints, origin, destination, flight_level):
+    """ForeFlight route text and its foreflightmobile:// URL.
+
+    Mirrors notebooks/SendToForeFlight.ipynb: `APT@<origin>` then one
+    `<lat>N/<lon>W/F<level>` token per waypoint, then the destination. The flight level is
+    hundreds of feet, so 200 means FL200 / 20,000 ft. Coordinates go out at 4 decimals as
+    the notebook does -- about 11 m, which is far finer than the route line needs and keeps
+    the URL short enough to stay a scannable QR code.
+    """
+    parts = []
+    for _name, lat, lon in waypoints:
+        parts.append(f"{abs(lat):.4f}{'N' if lat >= 0 else 'S'}/"
+                     f"{abs(lon):.4f}{'E' if lon >= 0 else 'W'}/F{flight_level}")
+    route_text = f"APT@{origin}+" + "+".join(parts) + f"+{destination}"
+    return route_text, f"foreflightmobile://maps/search?q={route_text}"
+
+
 # --- HOVER HELP ---
 
 class ToolTip:
@@ -406,6 +423,12 @@ class FlightPlannerGUI(tk.Tk):
         self.rectangular_box = tk.BooleanVar(value=True)
         self.repeats = tk.StringVar(value="1")
 
+        # QR view replaces the flight path in the same pane, so the code gets the full
+        # width -- a dense survey needs every pixel per module to stay scannable.
+        self.showing_qr = False
+        self.qr_button_text = tk.StringVar(value="Show QR")
+        self._route = None
+
         self._setup_layout()
         self._load_defaults()
         self.calculate_and_render()
@@ -490,7 +513,12 @@ class FlightPlannerGUI(tk.Tk):
             # on the trailing side. Default to no shift so the requested padding actually
             # holds on all sides; the summary panel reports the padding achieved.
             ("Latitude Offset (deg):", "lat_offset", "0.0"),
-            ("Longitude Offset (deg):", "lon_offset", "0.0")
+            ("Longitude Offset (deg):", "lon_offset", "0.0"),
+            # Route endpoints and cruise level for the ForeFlight route link and its QR
+            # code. Not used by the survey geometry at all.
+            ("Origin Airport:", "origin_airport", "KBOI"),
+            ("Destination Airport:", "destination_airport", "KBOI"),
+            ("Survey Flight Level:", "survey_altitude", "200"),
         ]
 
         for i, (label_text, dict_key, default_val) in enumerate(fields, start=6):
@@ -574,6 +602,16 @@ class FlightPlannerGUI(tk.Tk):
                    command=self._open_map_in_browser).pack(side=tk.RIGHT)
         ttk.Button(preview_header, text="Show Export Files",
                    command=self._open_export_folder).pack(side=tk.RIGHT, padx=(0, 8))
+        qr_button = ttk.Button(preview_header, textvariable=self.qr_button_text,
+                               width=10, command=self._toggle_qr)
+        qr_button.pack(side=tk.RIGHT, padx=(0, 8))
+        ToolTip(qr_button,
+                "Swap this pane between the flight path and a QR code of the ForeFlight "
+                "route link.\n\n"
+                "Scanning it on the iPad opens ForeFlight with the whole survey as a "
+                "route, origin and destination included — no file transfer needed.\n\n"
+                "Route endpoints and the flight level come from the Origin Airport, "
+                "Destination Airport and Survey Flight Level fields.")
         # View-only toggles: they redraw from cached geometry, they do not recalculate.
         boundary_check = ttk.Checkbutton(preview_header, text="Boundary labels",
                                          variable=self.show_boundary_labels,
@@ -633,12 +671,108 @@ class FlightPlannerGUI(tk.Tk):
         self.preview_canvas.create_text(x, y, text=text, anchor=anchor, fill=fill, font=font)
         return True
 
+    def _toggle_qr(self):
+        """Flip the pane between the flight path and the route QR code."""
+        self.showing_qr = not self.showing_qr
+        self.qr_button_text.set("Hide QR" if self.showing_qr else "Show QR")
+        self._draw_preview()
+
+    def _draw_qr(self):
+        """Draw the route QR straight onto the canvas as rectangles.
+
+        qrcode's make_image() needs Pillow, which this project deliberately does without
+        (see the preview pane). get_matrix() gives the module grid with no image library
+        at all, and the canvas can paint it directly.
+        """
+        canvas = self.preview_canvas
+        width, height = canvas.winfo_width(), canvas.winfo_height()
+
+        if not self._route:
+            canvas.create_text(width / 2, height / 2, fill="#888888", font=("Helvetica", 11),
+                               text="Generate a flight plan first.")
+            return
+
+        route_text, url = self._route
+        try:
+            import qrcode
+        except ImportError:
+            canvas.create_text(width / 2, height / 2, fill="#a01010", font=("Helvetica", 11),
+                               width=width - 80, justify=tk.CENTER,
+                               text="The qrcode package is not installed.\n\n"
+                                    "pip install qrcode\n\n"
+                                    "(Pillow is NOT required — the code is drawn directly.)")
+            return
+
+        code = qrcode.QRCode(border=4)   # 4 modules of quiet zone, per the QR spec
+        code.add_data(url)
+        try:
+            code.make(fit=True)
+            matrix = code.get_matrix()
+        except Exception as err:
+            canvas.create_text(width / 2, height / 2, fill="#a01010", font=("Helvetica", 11),
+                               width=width - 80, justify=tk.CENTER,
+                               text=f"Route will not fit in a QR code.\n\n{err}\n\n"
+                                    f"{len(url)} characters. Reduce the number of lines.")
+            return
+
+        top = 84                      # room for the header lines
+        bottom = 76                   # room for the wrapped link and the caption
+        modules = len(matrix)
+        scale = int(min((width - 40) / modules, (height - top - bottom) / modules))
+        if scale < 1:
+            canvas.create_text(width / 2, height / 2, fill="#a01010", font=("Helvetica", 11),
+                               text="Pane too small to draw the QR code — enlarge the window.")
+            return
+
+        side = modules * scale
+        off_x = (width - side) / 2.0
+        off_y = top + (height - top - bottom - side) / 2.0
+
+        # White backing under the whole symbol, quiet zone included.
+        canvas.create_rectangle(off_x, off_y, off_x + side, off_y + side,
+                                fill="white", outline="")
+        for r, row in enumerate(matrix):
+            run_start = None
+            for c in range(modules + 1):
+                dark = c < modules and row[c]
+                if dark and run_start is None:
+                    run_start = c
+                elif not dark and run_start is not None:
+                    # Draw each horizontal run as one rectangle rather than per module:
+                    # a version-25 code is 14,641 modules and Tk slows to a crawl at that
+                    # many canvas items.
+                    canvas.create_rectangle(off_x + run_start * scale, off_y + r * scale,
+                                            off_x + c * scale, off_y + (r + 1) * scale,
+                                            fill="#000000", outline="")
+                    run_start = None
+
+        meta = self._preview['meta'] if self._preview else {}
+        canvas.create_text(40, 24, anchor="w", fill="#222222", font=("Helvetica", 11, "bold"),
+                           text=f"{meta.get('area_name', 'Survey')} — ForeFlight route link")
+        canvas.create_text(40, 46, anchor="w", fill="#555555", font=("Helvetica", 9),
+                           text=f"Scan with the iPad camera to open this survey as a route "
+                                f"in ForeFlight. QR version {code.version}, {modules} modules.")
+        canvas.create_text(40, 64, anchor="w", fill="#555555", font=("Helvetica", 9),
+                           text=f"{route_text.count('+') - 1} waypoints between "
+                                f"{route_text.split('@')[1].split('+')[0]} and "
+                                f"{route_text.rsplit('+', 1)[1]}   ·   {len(url)} characters")
+        canvas.create_text(width / 2, height - 44, fill="#777777", font=("Helvetica", 8),
+                           width=width - 80, justify=tk.CENTER,
+                           text=url if len(url) <= 110 else url[:107] + "...")
+        canvas.create_text(width / 2, height - 16, fill="#777777", font=("Helvetica", 8),
+                           text=f"Full link saved next to the exports as "
+                                f"{meta.get('area_name', '<AREA>')}_foreflight_route.txt")
+
     def _draw_preview(self):
         """Render the cached survey geometry (UTM metres, so already equal-aspect)."""
         canvas = self.preview_canvas
         canvas.delete("all")
         width, height = canvas.winfo_width(), canvas.winfo_height()
         if width < 60 or height < 60:
+            return
+
+        if self.showing_qr:
+            self._draw_qr()
             return
 
         if not self._preview:
@@ -997,6 +1131,19 @@ class FlightPlannerGUI(tk.Tk):
         kml_file, kmz_file, pack_file = self._export_foreflight_bundle(
             area_name, waypoint_prefix, kml_text, waypoints, generated_utc, manifest_stamp, out_dir)
 
+        # Route link for the QR view and for pasting into an email. Nothing here feeds the
+        # survey geometry, so bad input degrades the link rather than the flight plan.
+        route_text, route_url = build_foreflight_route(
+            waypoints,
+            self.inputs["origin_airport"].get().strip().upper() or "KBOI",
+            self.inputs["destination_airport"].get().strip().upper() or "KBOI",
+            self.inputs["survey_altitude"].get().strip() or "200",
+        )
+        self._route = (route_text, route_url)
+        route_file = os.path.join(out_dir, f"{area_name}_foreflight_route.txt")
+        with open(route_file, 'w', encoding='utf-8') as f:
+            f.write(route_text + "\n\n" + route_url + "\n")
+
         # Verify the padding actually achieved rather than assuming the request was met.
         target_poly = Polygon([to_m.transform(lon, lat) for lat, lon, _ in survey_boundary]).buffer(0)
         clearance_m = measure_clearance(target_poly, survey_poly)
@@ -1028,6 +1175,7 @@ class FlightPlannerGUI(tk.Tk):
             f"ForeFlight layer: {os.path.basename(kml_file)}",
             f"ForeFlight layer: {os.path.basename(kmz_file)}",
             f"Share with pilot: {os.path.basename(pack_file)}",
+            f"Route link: {os.path.basename(route_file)}",
             "-" * 41
         ]
         for idx, dm, dnm, tmin in segment_summaries:

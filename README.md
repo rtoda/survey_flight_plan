@@ -104,7 +104,16 @@ git-ignored — it is all regenerable, so nothing there is precious:
   overlay plus real waypoints he can build a route from and override.
 - `<AREA>_plan.json` — the saved plan (boundary points and parameters) that produced all of the above
 
+- `<AREA>_foreflight_route.txt` — the ForeFlight route string and its `foreflightmobile://`
+  link, for pasting into an email
+
 Use **Show Export Files** in the app to open the folder for AirDropping.
+
+**Show QR** swaps the right pane for a QR code of that route link. Scanning it with the iPad
+camera opens the whole survey in ForeFlight as a route, origin and destination included, with
+no file transfer at all. The endpoints and cruise level come from the **Origin Airport**,
+**Destination Airport** and **Survey Flight Level** fields (200 means FL200, 20,000 ft).
+Drawn directly on the canvas, so Pillow is not required.
 
 See [foreflight.md](foreflight.md) for the import rules these files are built against,
 including which claims are verified against ForeFlight's docs and which are not.
