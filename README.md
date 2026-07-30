@@ -18,6 +18,7 @@ achieved on all sides.
 - Saves an interactive Folium HTML map, opened on demand via **Open Interactive Map in Browser**
 - Exports a KML/KMZ map layer and a ForeFlight content pack for getting the pattern onto an iPad
 - Saves and reloads a whole plan — boundary points and every parameter — as JSON
+- Renders a scannable QR of the ForeFlight route link right in the window (no Pillow needed)
 
 ## Layout
 - `airborne_survey_gui.py` — main GUI (scaled path preview drawn in-window; Folium map opens in a browser)
@@ -42,7 +43,8 @@ The primary Python dependencies (also listed in `requirements.txt`) include:
 Additional packages required by the GUIs but not always present in `requirements.txt`:
 
 - pyproj
-- Pillow (PIL) — only needed by the QR-code variant
+- Pillow (PIL) — **only** for the QR image in `notebooks/SendToForeFlight.ipynb`.
+  The GUI's own QR view draws on the canvas and does not need it.
 
 On macOS, `tkinter` is usually provided by the system Python. If using Conda, install `tk` via Conda or ensure the selected Python includes Tk support.
 
@@ -58,15 +60,15 @@ conda activate flightplan
 
 ```bash
 pip install -r requirements.txt
-# install missing extras
-pip install pyproj Pillow
+# pyproj is required; Pillow only if you want the notebook's QR image
+pip install pyproj
 ```
 
 If you prefer `pipenv` or `venv`, create an environment and use the same `pip install` commands.
 
 ## Usage
 
-Run either GUI script and interactively enter boundary waypoints (minimum 3), set parameters, then click the generate button.
+Enter boundary waypoints (minimum 3), set parameters, then click the generate button.
 
 ```bash
 python airborne_survey_gui.py
@@ -103,7 +105,6 @@ git-ignored — it is all regenerable, so nothing there is precious:
   correctly-named `user_waypoints.csv`. This is the one to send the pilot: he gets the same
   overlay plus real waypoints he can build a route from and override.
 - `<AREA>_plan.json` — the saved plan (boundary points and parameters) that produced all of the above
-
 - `<AREA>_foreflight_route.txt` — the ForeFlight route string and its `foreflightmobile://`
   link, for pasting into an email
 
@@ -126,8 +127,9 @@ including which claims are verified against ForeFlight's docs and which are not.
 - The GUI runs one calculation at startup, so the preview and CSVs already exist before you
   click anything. The status line under the button stamps each run so repeat clicks are visible.
 - Tile-backed maps need real JavaScript; use **Open Interactive Map in Browser** for that view.
-- `notebooks/SendToForeFlight.ipynb` builds a `foreflightmobile://` route link and a QR code
-  from a generated ForeFlight CSV. It needs Pillow for the QR image.
+- `notebooks/SendToForeFlight.ipynb` does the same route link and QR as the **Show QR**
+  button, but standalone against an exported CSV. It calls `make_image()`, so unlike the
+  GUI it does need Pillow.
 
 ## Getting a plan onto the iPad from Windows
 AirDrop does not exist on Windows, so email the content pack to yourself or put it in cloud
