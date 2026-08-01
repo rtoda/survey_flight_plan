@@ -5,10 +5,10 @@ exports waypoints for ForeFlight and a Honeywell FMS.
 
 ![The planner: parameters and boundary points on the left, scaled flight-path preview on the right](docs/screenshot.png)
 
-Above: a 4 km swath at heading 045, giving five survey lines across a box rotated onto the
-diagonal. Every line is the same length, each end is labelled with the name written to the
-CSVs, and the summary panel confirms the requested 5.00 km perimeter margin was actually
-achieved on all sides.
+Above: a 4 km swath at heading 045 — five equal-length survey lines across a box rotated onto
+the diagonal, each end labelled with the name written to the CSVs. The grey dashed leg runs
+in from a transit waypoint to `L01I`, an 8 km lead-in on the line's own bearing so the
+aircraft is established on track before the first line begins.
 
 ## Features
 - Interactive Tkinter GUI to define survey boundary points and flight parameters
@@ -86,6 +86,11 @@ but lines of very uneven length.
 
 **Repeats** (1–4) flies the whole box that many times, with identical line directions each
 cycle. Line numbering continues across cycles, so waypoint names stay unique.
+
+**Lead-in Distance** puts a waypoint that far back from the first line's start, along that
+line's own bearing, so the aircraft rolls out wings-level and is established on track before
+the line — and the sensor run — begins. It is named `L01I` (intercept), so the sequence reads
+`L01I`, `L01S`, `L01F`. Set 0 to disable.
 
 **Retrace line** flies each row out and back before moving to the next, rather than once
 through. The return run is numbered as its own line, so three rows become `1L1S`…`1L6F`.

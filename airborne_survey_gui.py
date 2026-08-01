@@ -349,6 +349,24 @@ def build_survey_kml(area_name, envelope_latlon, track_latlon, waypoints, bounda
     return out.getvalue()
 
 
+def lead_in_point(first_segment, lead_km):
+    """A point `lead_km` back from a line's start, along that line's own bearing.
+
+    Extending backwards rather than sideways is the whole point: the aircraft flies the
+    lead-in on the survey heading, so it is wings-level and established on track by the
+    time the line -- and the sensor run -- actually begins.
+    """
+    if lead_km <= 0:
+        return None
+    (x0, y0), (x1, y1) = first_segment.coords[0], first_segment.coords[-1]
+    dx, dy = x1 - x0, y1 - y0
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return None
+    return (x0 - dx / length * lead_km * 1000.0,
+            y0 - dy / length * lead_km * 1000.0)
+
+
 def foreflight_waypoint_name(raw, fallback):
     """Coerce a user-typed label into something ForeFlight will accept as a waypoint name.
 
@@ -456,7 +474,7 @@ class FlightPlannerGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Airborne Survey Flight Path Planner")
-        self.geometry("1300x850")
+        self.geometry("1500x900")
         
         # Default Survey Coordinates
         self.survey_boundary = [
@@ -608,6 +626,9 @@ class FlightPlannerGUI(tk.Tk):
             # holds on all sides; the summary panel reports the padding achieved.
             ("Latitude Offset (deg):", "lat_offset", "0.0"),
             ("Longitude Offset (deg):", "lon_offset", "0.0"),
+            # 0 disables it. Anything else puts a waypoint that far back along the first
+            # line's own bearing, so the aircraft is wings-level on track before the line.
+            ("Lead-in Distance (km):", "lead_in_km", "0.0"),
             # Route endpoints and cruise level for the ForeFlight route link and its QR
             # code. Not used by the survey geometry at all.
             ("Origin Airport:", "origin_airport", "KBOI"),
@@ -749,7 +770,7 @@ class FlightPlannerGUI(tk.Tk):
         preview_header = ttk.Frame(right_frame, padding=(8, 6))
         preview_header.pack(fill=tk.X)
         ttk.Label(preview_header, text="Flight Path Preview", font=("Helvetica", 10, "bold")).pack(side=tk.LEFT)
-        ttk.Button(preview_header, text="Open Interactive Map in Browser",
+        ttk.Button(preview_header, text="Open Map in Browser",
                    command=self._open_map_in_browser).pack(side=tk.RIGHT)
         ttk.Button(preview_header, text="Show Export Files",
                    command=self._open_export_folder).pack(side=tk.RIGHT, padx=(0, 8))
@@ -1444,6 +1465,7 @@ class FlightPlannerGUI(tk.Tk):
             heading = float(self.inputs["initial_heading_deg"].get())
             lat_off = float(self.inputs["lat_offset"].get())
             lon_off = float(self.inputs["lon_offset"].get())
+            lead_in_km = max(0.0, float(self.inputs["lead_in_km"].get()))
         except ValueError:
             messagebox.showerror("Input Error", "Ensure all Flight settings are valid numbers.")
             return
@@ -1493,9 +1515,15 @@ class FlightPlannerGUI(tk.Tk):
             return
         self._output_dir = out_dir
 
+        # The lead-in is flown, so it belongs on the path as well as in the waypoint list.
+        lead_xy = lead_in_point(segments[0], lead_in_km) if segments else None
+        if lead_xy is not None:
+            survey_pattern = LineString([lead_xy] + list(survey_pattern.coords))
+
         try:
             ff_file, hw_file, waypoints, survey_waypoints = self._export_csv_files(
-                segments, xy_to_latlon, area_name, waypoint_prefix, out_dir, before, after)
+                segments, xy_to_latlon, area_name, waypoint_prefix, out_dir, before, after,
+                lead_xy)
         except ValueError as err:
             messagebox.showerror("Waypoint Naming Error", str(err))
             return
@@ -1557,6 +1585,8 @@ class FlightPlannerGUI(tk.Tk):
             f"Retrace: on — {len(segments) // (repeats * 2)} rows flown out and back"
             if self.retrace_lines.get() else "Retrace: off",
             f"Generated Survey Lines: {len(segments)}",
+            f"Lead-in: {lead_in_km:.2f} km on the line bearing" if lead_xy is not None
+            else "Lead-in: off",
             f"Ground Heading: {heading:.1f}° True",
             f"Requested Margin: {margin:.2f} km",
             margin_note,
@@ -1700,7 +1730,7 @@ class FlightPlannerGUI(tk.Tk):
         )
 
     def _export_csv_files(self, flown_segments, conversion_func, area_name, line_prefix, out_dir,
-                          before=(), after=()):
+                          before=(), after=(), lead_xy=None):
         """Write both flight-plan CSVs in the exact formats the pilot supplied samples for.
 
         Waypoints are named per survey line as <prefix>L<n>S / <prefix>L<n>F -- Start and
@@ -1717,6 +1747,11 @@ class FlightPlannerGUI(tk.Tk):
         digits = max(2, len(str(len(flown_segments))))
 
         survey = []
+        if lead_xy is not None:
+            # Named for the line it leads into: L01I, then L01S, then L01F. I for
+            # intercept, so the sequence reads intercept, start, finish.
+            (lead_lat, lead_lon), = conversion_func([lead_xy])
+            survey.append((f"{line_prefix}L{1:0{digits}d}I", lead_lat, lead_lon))
         for idx, segment in enumerate(flown_segments, start=1):
             ends = conversion_func([segment.coords[0], segment.coords[-1]])
             (start_lat, start_lon), (end_lat, end_lon) = ends
