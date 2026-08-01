@@ -28,6 +28,11 @@ from pyproj import CRS, Transformer
 # the project root. Git-ignored wholesale.
 PLANS_DIR = "plans"
 
+# Records which plan was last worked on, so a relaunch comes back to it rather than the
+# built-in demo area. Kept inside plans/ on purpose: it is regenerable state, not
+# configuration, so clearing plans/ correctly forgets it and the project root stays clean.
+LAST_PLAN_POINTER = ".last_plan"
+
 # Rows offered for transit waypoints, in each of the before/after groups.
 TRANSIT_ROWS = 6
 
@@ -554,8 +559,10 @@ class FlightPlannerGUI(tk.Tk):
         # plus the path of the last saved Folium map for the "open in browser" button.
         self._preview = None
         self._map_path = None
-        # Closure that writes the Folium map, outstanding until the idle queue runs it.
+        # Closure that writes the Folium map, outstanding until the idle queue runs it,
+        # plus the id of the scheduled callback so it can be cancelled.
         self._pending_map = None
+        self._map_after_id = None
         self._output_dir = None
         self._run_count = 0
 
@@ -597,7 +604,13 @@ class FlightPlannerGUI(tk.Tk):
 
         self._setup_layout()
         self._load_defaults()
+        # Defaults first, then last session's plan over the top, so a failure to restore
+        # leaves a usable app rather than empty fields.
+        restored = self._restore_last_plan()
         self.calculate_and_render()
+        if restored:
+            self.status_var.set(f"Reopened {os.path.basename(restored)} from your last "
+                                f"session. {self.status_var.get()}")
 
     def _setup_layout(self):
         # Main split: Left controls, Right visualization map
@@ -940,6 +953,19 @@ class FlightPlannerGUI(tk.Tk):
         for sequence in ("<Button-3>", "<Button-2>"):
             self.preview_canvas.bind(sequence, self._reset_zoom)
 
+    def _cancel_map_callback(self):
+        """Drop any queued _flush_map, without touching the pending closure itself.
+
+        A callback left in Tk's queue when the window goes away fires against a command
+        that no longer exists, which Tcl reports on stderr as an invalid command name.
+        """
+        if self._map_after_id is not None:
+            try:
+                self.after_cancel(self._map_after_id)
+            except Exception:
+                pass
+            self._map_after_id = None
+
     def _flush_map(self):
         """Write the deferred Folium map if one is outstanding.
 
@@ -947,6 +973,7 @@ class FlightPlannerGUI(tk.Tk):
         needs the file to exist. The pending closure is cleared *before* it runs, so a
         failure reports once rather than being retried by the next caller.
         """
+        self._cancel_map_callback()
         render, self._pending_map = self._pending_map, None
         if render is None:
             return
@@ -1511,6 +1538,41 @@ class FlightPlannerGUI(tk.Tk):
         own = os.path.join(os.getcwd(), PLANS_DIR, area_name) if area_name else None
         return own if own and os.path.isdir(own) else self._plans_root()
 
+    def _pointer_path(self):
+        return os.path.join(os.getcwd(), PLANS_DIR, LAST_PLAN_POINTER)
+
+    def _remember_plan(self, path):
+        """Note which plan to reopen next launch.
+
+        Best-effort by design: failing to record where you were is not worth interrupting
+        a run that otherwise succeeded, so this never raises and never reports.
+        """
+        try:
+            os.makedirs(os.path.join(os.getcwd(), PLANS_DIR), exist_ok=True)
+            with open(self._pointer_path(), 'w', encoding='utf-8') as f:
+                f.write(os.path.abspath(path))
+        except OSError:
+            pass
+
+    def _restore_last_plan(self):
+        """Reopen the plan from the last session over the top of the built-in defaults.
+
+        Deliberately forgiving, and the reason it catches broadly: this runs before the
+        window is usable, so a pointer to a deleted, moved or hand-broken plan must leave
+        the user with a working app on the defaults rather than a startup crash or a modal
+        they cannot get past. Returns the path restored, or None if the defaults stand.
+        """
+        try:
+            with open(self._pointer_path(), encoding='utf-8') as f:
+                path = f.read().strip()
+            if not path or not os.path.isfile(path):
+                return None
+            with open(path, encoding='utf-8') as f:
+                self._apply_plan_dict(json.load(f))
+            return path
+        except Exception:
+            return None
+
     def _save_plan(self):
         area_name = self.area_name_entry.get().strip().replace(' ', '_') or "survey_area"
         path = filedialog.asksaveasfilename(
@@ -1527,6 +1589,7 @@ class FlightPlannerGUI(tk.Tk):
         except OSError as err:
             messagebox.showerror("Save Failed", str(err))
             return
+        self._remember_plan(path)
         self.status_var.set(f"Saved plan to {path}")
 
     def _load_plan(self):
@@ -1548,6 +1611,7 @@ class FlightPlannerGUI(tk.Tk):
         # A zoom from the previous plan means nothing over a different area.
         self._zoom = None
         self._update_zoom_controls()
+        self._remember_plan(path)
         self.status_var.set(f"Loaded plan {os.path.basename(path)} — regenerating.")
         self.calculate_and_render()
 
@@ -1688,6 +1752,11 @@ class FlightPlannerGUI(tk.Tk):
             messagebox.showerror("Output Folder Error", f"{out_dir}\n\n{err}")
             return
         self._output_dir = out_dir
+        # Generating into an area is what "working on it" means, so the pointer follows the
+        # run rather than only an explicit Save. It points at this canonical copy even if
+        # the plan was loaded from somewhere else -- the contents are the same, and this one
+        # is guaranteed to sit beside the outputs it produced.
+        self._remember_plan(os.path.join(out_dir, f"{area_name}_plan.json"))
 
         # The lead-in is flown, so it belongs on the path as well as in the waypoint list.
         # It sits outside the box, so "survey box only" suppresses it along with the transit.
@@ -1940,7 +2009,8 @@ class FlightPlannerGUI(tk.Tk):
             except OSError:
                 pass                      # still open in a browser; render_map overwrites it
         self._pending_map = render_map
-        self.after_idle(self._flush_map)
+        self._cancel_map_callback()          # supersede the previous run's, if it is queued
+        self._map_after_id = self.after_idle(self._flush_map)
 
         self._run_count += 1
         short = clearance_m < margin * 1000.0 - 1.0

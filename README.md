@@ -79,6 +79,12 @@ Boundary points and flight parameters can be saved and reloaded with **Save Plan
 run also drops a `<AREA>_plan.json` next to its outputs, so any past plan folder can be
 reloaded as-is. The dialogs open on `plans/` by default.
 
+**The app reopens whatever you were last working on**, rather than the built-in demo area —
+saving, loading, or generating into an area all make it the one that comes back next launch.
+The pointer is a single line in `plans/.last_plan`; delete that file (or the whole `plans/`
+tree) to get the demo area back. A last plan that has since been deleted, moved or broken is
+ignored and the demo area loads instead, so a bad file can never stop the app opening.
+
 **Rectangular Box** (on by default) flies the smallest rectangle enclosing the target plus
 its perimeter margin, at the chosen heading — equal-length parallel lines, "mow the lawn".
 Unchecked, the passes are clipped to the padded target outline instead: less ground covered,
