@@ -455,6 +455,13 @@ class FlightPlannerGUI(tk.Tk):
         self.qr_button_text = tk.StringVar(value="Show QR")
         self._route = None
 
+        # Preview zoom. _zoom is the map region (metres) to fill the pane with, or None for
+        # the full extent; _view caches the last draw's transform so a pixel rectangle can
+        # be turned back into map coordinates.
+        self._zoom = None
+        self._view = None
+        self._drag_origin = None
+
         self._setup_layout()
         self._load_defaults()
         self.calculate_and_render()
@@ -666,6 +673,16 @@ class FlightPlannerGUI(tk.Tk):
                    command=self._open_map_in_browser).pack(side=tk.RIGHT)
         ttk.Button(preview_header, text="Show Export Files",
                    command=self._open_export_folder).pack(side=tk.RIGHT, padx=(0, 8))
+        self.zoom_button = ttk.Button(preview_header, text="Reset Zoom", width=11,
+                                      command=self._reset_zoom)
+        self.zoom_button.state(["disabled"])
+        self.zoom_button.pack(side=tk.RIGHT, padx=(0, 8))
+        ToolTip(self.zoom_button,
+                "Drag a box on the preview to zoom into it. Right-click the preview, or "
+                "press this, to go back to the full extent.\n\n"
+                "The selection is grown to the pane's shape before zooming, so a metre "
+                "stays a metre in both directions and the pattern is never stretched.")
+
         qr_button = ttk.Button(preview_header, textvariable=self.qr_button_text,
                                width=10, command=self._toggle_qr)
         qr_button.pack(side=tk.RIGHT, padx=(0, 8))
@@ -701,6 +718,12 @@ class FlightPlannerGUI(tk.Tk):
         self.preview_canvas = tk.Canvas(right_frame, bg="white", highlightthickness=0)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
         self.preview_canvas.bind("<Configure>", lambda _event: self._draw_preview())
+        self.preview_canvas.bind("<ButtonPress-1>", self._on_zoom_press)
+        self.preview_canvas.bind("<B1-Motion>", self._on_zoom_drag)
+        self.preview_canvas.bind("<ButtonRelease-1>", self._on_zoom_release)
+        # Button-2 as well as 3: right-click is the middle button number on some macOS setups.
+        for sequence in ("<Button-3>", "<Button-2>"):
+            self.preview_canvas.bind(sequence, self._reset_zoom)
 
     def _open_map_in_browser(self):
         if not self._map_path or not os.path.exists(self._map_path):
@@ -734,6 +757,69 @@ class FlightPlannerGUI(tk.Tk):
         self.preview_canvas.create_rectangle(x0, y0, x1, y1, fill="white", outline="")
         self.preview_canvas.create_text(x, y, text=text, anchor=anchor, fill=fill, font=font)
         return True
+
+    # --- PREVIEW ZOOM ----------------------------------------------------------------
+
+    def _update_zoom_controls(self):
+        self.zoom_button.state(["!disabled"] if self._zoom else ["disabled"])
+
+    def _reset_zoom(self, _event=None):
+        if self._zoom is None:
+            return
+        self._zoom = None
+        self._update_zoom_controls()
+        self._draw_preview()
+
+    def _on_zoom_press(self, event):
+        # No zooming in the QR view -- it is not a map.
+        self._drag_origin = None if (self.showing_qr or not self._view) else (event.x, event.y)
+
+    def _on_zoom_drag(self, event):
+        if not self._drag_origin:
+            return
+        x0, y0 = self._drag_origin
+        self.preview_canvas.delete("zoombox")
+        self.preview_canvas.create_rectangle(x0, y0, event.x, event.y, outline="#1f6fd0",
+                                             width=1, dash=(4, 3), tags="zoombox")
+
+    def _on_zoom_release(self, event):
+        if not self._drag_origin:
+            return
+        x0, y0 = self._drag_origin
+        self._drag_origin = None
+        self.preview_canvas.delete("zoombox")
+        # A click, or a twitch while clicking, is not a zoom request.
+        if abs(event.x - x0) < 12 or abs(event.y - y0) < 12:
+            return
+        self._zoom = self._pixels_to_region(x0, y0, event.x, event.y)
+        self._update_zoom_controls()
+        self._draw_preview()
+
+    def _pixels_to_region(self, x0, y0, x1, y1):
+        """Turn a dragged pixel rectangle into a map region, in metres."""
+        view = self._view
+
+        def to_map(px, py):
+            return (view['min_x'] + (px - view['off_x']) / view['scale'],
+                    view['min_y'] + (view['base_y'] - py) / view['scale'])
+
+        (ax, ay), (bx, by) = to_map(x0, y0), to_map(x1, y1)
+        min_x, max_x = sorted((ax, bx))
+        min_y, max_y = sorted((ay, by))
+
+        # Grow the selection to the drawing area's aspect ratio. Without this a wide, flat
+        # drag would stretch the pattern, and this preview's whole point is that a metre
+        # across reads the same as a metre up.
+        span_x = max(max_x - min_x, 1.0)
+        span_y = max(max_y - min_y, 1.0)
+        pane_aspect = max(view['avail_w'], 1.0) / max(view['avail_h'], 1.0)
+        if span_x / span_y < pane_aspect:
+            grow = (span_y * pane_aspect - span_x) / 2.0
+            min_x, max_x = min_x - grow, max_x + grow
+        else:
+            grow = (span_x / pane_aspect - span_y) / 2.0
+            min_y, max_y = min_y - grow, max_y + grow
+        return (min_x, min_y, max_x, max_y)
 
     def _toggle_qr(self):
         """Flip the pane between the flight path and the route QR code."""
@@ -852,20 +938,28 @@ class FlightPlannerGUI(tk.Tk):
         transit_after = self._preview.get('transit_after', [])
         points = (list(rect) + list(track) + [(x, y) for x, y, _ in marks]
                   + [(x, y) for x, y, _ in transit_before + transit_after])
-        min_x = min(p[0] for p in points)
-        max_x = max(p[0] for p in points)
-        min_y = min(p[1] for p in points)
-        max_y = max(p[1] for p in points)
+        if self._zoom:
+            min_x, min_y, max_x, max_y = self._zoom
+        else:
+            min_x = min(p[0] for p in points)
+            max_x = max(p[0] for p in points)
+            min_y = min(p[1] for p in points)
+            max_y = max(p[1] for p in points)
         span_x = max(max_x - min_x, 1.0)
         span_y = max(max_y - min_y, 1.0)
 
         # Asymmetric padding: the top band is reserved for the header and legend and the
         # bottom for the scale bar, so the pattern is never drawn underneath either.
         pad, pad_top, pad_bottom = 60, 108, 52
-        scale = min((width - 2 * pad) / span_x, (height - pad_top - pad_bottom) / span_y)
+        avail_w = width - 2 * pad
+        avail_h = height - pad_top - pad_bottom
+        scale = min(avail_w / span_x, avail_h / span_y)
         off_x = (width - span_x * scale) / 2.0
-        band = height - pad_top - pad_bottom
-        base_y = pad_top + (band + span_y * scale) / 2.0   # screen y of min_y
+        base_y = pad_top + (avail_h + span_y * scale) / 2.0   # screen y of min_y
+
+        # Cached so a dragged pixel rectangle can be converted back into map metres.
+        self._view = {'min_x': min_x, 'min_y': min_y, 'scale': scale, 'off_x': off_x,
+                      'base_y': base_y, 'avail_w': avail_w, 'avail_h': avail_h}
 
         def to_px(point):
             return (off_x + (point[0] - min_x) * scale,
@@ -980,6 +1074,11 @@ class FlightPlannerGUI(tk.Tk):
                   ("#7b2fbe", "Boundary waypoints")]
         if transit_before or transit_after:
             legend.append(("#8a8a8a", "Transit legs to and from the box"))
+        canvas.create_text(width - pad, 20, anchor="e",
+                           fill="#a06000" if self._zoom else "#999999",
+                           font=("Helvetica", 8, "bold" if self._zoom else "normal"),
+                           text="ZOOMED — right-click to reset" if self._zoom
+                                else "drag a box to zoom")
         for row, (color, text) in enumerate(legend):
             ly = legend_top + row * 16
             canvas.create_line(pad, ly, pad + 18, ly, fill=color, width=3)
@@ -1159,6 +1258,9 @@ class FlightPlannerGUI(tk.Tk):
         except (OSError, ValueError, json.JSONDecodeError) as err:
             messagebox.showerror("Load Failed", f"{path}\n\n{err}")
             return
+        # A zoom from the previous plan means nothing over a different area.
+        self._zoom = None
+        self._update_zoom_controls()
         self.status_var.set(f"Loaded plan {os.path.basename(path)} — regenerating.")
         self.calculate_and_render()
 

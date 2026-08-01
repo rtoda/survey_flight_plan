@@ -124,6 +124,12 @@ git-ignored — it is all regenerable, so nothing there is precious:
 - `<AREA>_foreflight_route.txt` — the ForeFlight route string and its `foreflightmobile://`
   link, for pasting into an email
 
+**Drag a box on the preview** to zoom into it; **right-click** the preview, or press
+**Reset Zoom**, to go back to the full extent. The dragged selection is grown to the pane's
+shape first, so a metre across always reads the same as a metre up and the pattern is never
+stretched. Useful once transit legs stretch the view — they can push the survey box down to
+a corner.
+
 Use **Show Export Files** in the app to open the folder for AirDropping.
 
 **Show QR** swaps the right pane for a QR code of that route link. Scanning it with the iPad
