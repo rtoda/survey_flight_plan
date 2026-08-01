@@ -25,16 +25,28 @@ files and compares our rows against them structurally.
 The two samples are unrelated missions (one off the Carolina coast, one in Utah); they
 demonstrate format, not content.
 
-### Waypoint naming — `1L1S` / `1L1F`
+### Waypoint naming — Start and Finish per line
 
-`<block>L<line><S|F>`: **S**tart and **F**inish of each survey line. Two waypoints per
-line, and **no waypoint on the turns** between lines. That is what makes the plan readable
-from the operator seat — you know you are on line 3 running to its finish, not staring at
-`CLM06`.
+His files read `1L1S`, `1L1F`, `1L2S` …: **S**tart and **F**inish of each survey line, two
+waypoints per line, and **no waypoint on the turns**. That is what makes a plan readable
+from the operator seat — you know you are on line 3 running to its finish.
 
-We emit `<Line ID Prefix>L<n>S` / `...F`, prefix defaulting to `1`. A concave area that
-splits one pass row into two straight runs numbers them as separate lines, so a name always
-brackets exactly one straight run.
+**Five characters is a hard ceiling**, not a preference:
+
+> "Waypoint names entered into the navigation data base are limited to a maximum of five
+> characters." — Jeppesen NavData name conventions, following ARINC 424
+
+His own names top out at exactly five (`1L10S`), which is the limit showing through rather
+than a coincidence.
+
+We emit `L01S` / `L01F`, widening the number only when the line count needs it (`L001S` past
+99 lines). The leading block digit is dropped by default because it spends one of the five
+characters to say nothing: `1L100S` is six characters and would be rejected. The optional
+Line ID Prefix puts it back for anyone who needs to tell two areas apart, and the exporter
+refuses rather than truncating if the result would overflow.
+
+A concave area that splits one pass row into two straight runs numbers them as separate
+lines, so a name always brackets exactly one straight run.
 
 ### Honeywell FMS CSV
 

@@ -27,6 +27,11 @@ PLANS_DIR = "plans"
 # Rows offered for transit waypoints, in each of the before/after groups.
 TRANSIT_ROWS = 6
 
+# "Waypoint names entered into the navigation data base are limited to a maximum of five
+# characters" -- Jeppesen NavData name conventions, following ARINC 424. Anything longer is
+# not a style question: the box will not take it.
+MAX_WAYPOINT_NAME = 5
+
 # --- SURVEY ENGINE CONFIGURATION & HELPERS ---
 
 def dd_to_honeywell_format(value, positive_indicator, negative_indicator, degree_digits=2):
@@ -506,11 +511,17 @@ class FlightPlannerGUI(tk.Tk):
         self.area_name_entry.insert(0, "Clairmont_Fire")
         self.area_name_entry.grid(row=1, column=1, sticky="w", pady=5, padx=10)
 
-        # Waypoints come out as <prefix>L<n>S / <prefix>L<n>F, so "1" gives the pilot's
-        # 1L1S / 1L1F convention. Not a 3-character prefix any more.
-        ttk.Label(param_tab, text="Line ID Prefix:").grid(row=2, column=0, sticky="w", pady=5)
+        # Waypoints come out as <prefix>L<nn>S / <prefix>L<nn>F. Empty by default: a
+        # navigation database allows five characters, and L999F already uses all five.
+        prefix_label = ttk.Label(param_tab, text="Line ID Prefix (optional):")
+        prefix_label.grid(row=2, column=0, sticky="w", pady=5)
         self.prefix_entry = ttk.Entry(param_tab, width=10)
-        self.prefix_entry.insert(0, "1")
+        ToolTip(prefix_label,
+                "Optional block letter in front of every waypoint name, for telling two "
+                "survey areas apart in the same database.\n\n"
+                "Names are L01S, L01F, L02S … — Line 01 Start, Line 01 Finish. A navigation "
+                "database caps identifiers at five characters, so a prefix only fits while "
+                "the line count stays under 100. Leave it empty unless you need it.")
         self.prefix_entry.grid(row=2, column=1, sticky="w", pady=5, padx=10)
 
         ttk.Separator(param_tab, orient='horizontal').grid(row=3, column=0, columnspan=2, sticky="ew", pady=10)
@@ -1195,7 +1206,9 @@ class FlightPlannerGUI(tk.Tk):
                                      f"longitude must both be decimal numbers, or leave both "
                                      f"blank and give an identifier.")
 
-            fallback = f"{line_prefix}{tag}{idx}"
+            # Padded to two digits so an empty prefix still clears ForeFlight's
+            # three-character minimum: B01, not B1.
+            fallback = f"{line_prefix}{tag}{idx:02d}"
             points.append({
                 "ident": ident or None,
                 "lat": lat,
@@ -1287,20 +1300,21 @@ class FlightPlannerGUI(tk.Tk):
                 for widget, key in zip(widgets, ("ident", "lat", "lon", "label")):
                     widget.insert(0, str(point.get(key, "")))
 
-    def _plan_dialog_dir(self):
-        """Open the dialogs on this plan's own folder, falling back to plans/."""
+    def _plans_root(self):
+        root = os.path.join(os.getcwd(), PLANS_DIR)
+        return root if os.path.isdir(root) else os.getcwd()
+
+    def _save_dialog_dir(self):
+        """Saving defaults into this plan's own folder, beside its other outputs."""
         area_name = self.area_name_entry.get().strip().replace(' ', '_')
-        for candidate in (os.path.join(os.getcwd(), PLANS_DIR, area_name) if area_name else None,
-                          os.path.join(os.getcwd(), PLANS_DIR)):
-            if candidate and os.path.isdir(candidate):
-                return candidate
-        return os.getcwd()
+        own = os.path.join(os.getcwd(), PLANS_DIR, area_name) if area_name else None
+        return own if own and os.path.isdir(own) else self._plans_root()
 
     def _save_plan(self):
         area_name = self.area_name_entry.get().strip().replace(' ', '_') or "survey_area"
         path = filedialog.asksaveasfilename(
             title="Save Flight Plan", defaultextension=".json",
-            initialdir=self._plan_dialog_dir(),
+            initialdir=self._save_dialog_dir(),
             initialfile=f"{area_name}_plan.json",
             filetypes=[("Flight plan", "*.json"), ("All files", "*.*")])
         if not path:
@@ -1317,7 +1331,9 @@ class FlightPlannerGUI(tk.Tk):
     def _load_plan(self):
         path = filedialog.askopenfilename(
             title="Load Flight Plan",
-            initialdir=self._plan_dialog_dir(),
+            # plans/ rather than one plan's folder: loading is for picking
+            # between plans, not for rummaging inside the current one.
+            initialdir=self._plans_root(),
             filetypes=[("Flight plan", "*.json"), ("All files", "*.*")])
         if not path:
             return
@@ -1359,11 +1375,12 @@ class FlightPlannerGUI(tk.Tk):
         if not area_name:
             messagebox.showerror("Input Error", "Filename/Area Name cannot be empty.")
             return
-        # Names are built as <prefix>L<n>S, so the L and S/F already satisfy ForeFlight's
-        # "at least 3 characters including a letter, no spaces" rule for any short prefix.
-        if not waypoint_prefix or not waypoint_prefix.isalnum() or len(waypoint_prefix) > 4:
+        # Optional. The L and the S/F already satisfy ForeFlight's "at least 3 characters
+        # including a letter" rule, and _export_csv_files enforces the 5-character ceiling
+        # on the finished name, which is what actually matters.
+        if waypoint_prefix and (not waypoint_prefix.isalnum() or len(waypoint_prefix) > 2):
             messagebox.showerror("Input Error",
-                                 "Line ID Prefix must be 1-4 letters or digits (e.g. '1').")
+                                 "Line ID Prefix must be empty, or 1-2 letters or digits.")
             return
 
         # 2. Harvest & Validate Coordinates from GPS list
@@ -1442,8 +1459,12 @@ class FlightPlannerGUI(tk.Tk):
             messagebox.showerror("Input Error", str(err))
             return
 
-        ff_file, hw_file, waypoints, survey_waypoints = self._export_csv_files(
-            segments, xy_to_latlon, area_name, waypoint_prefix, out_dir, before, after)
+        try:
+            ff_file, hw_file, waypoints, survey_waypoints = self._export_csv_files(
+                segments, xy_to_latlon, area_name, waypoint_prefix, out_dir, before, after)
+        except ValueError as err:
+            messagebox.showerror("Waypoint Naming Error", str(err))
+            return
 
         # 7. Parse and Print Diagnostics Panel
         self.stats_text.delete("1.0", tk.END)
@@ -1660,12 +1681,24 @@ class FlightPlannerGUI(tk.Tk):
         """
         # Single source of truth for waypoint names: whatever gets written here is what
         # the preview labels and the KML use, so they cannot disagree with these files.
+        # Zero-pad to the width the line count actually needs, minimum two digits. This
+        # keeps names sorting correctly and, with no prefix, holds L999F to five characters
+        # -- the ARINC 424 ceiling for a navigation database identifier.
+        digits = max(2, len(str(len(flown_segments))))
+
         survey = []
         for idx, segment in enumerate(flown_segments, start=1):
             ends = conversion_func([segment.coords[0], segment.coords[-1]])
             (start_lat, start_lon), (end_lat, end_lon) = ends
-            survey.append((f"{line_prefix}L{idx}S", start_lat, start_lon))
-            survey.append((f"{line_prefix}L{idx}F", end_lat, end_lon))
+            survey.append((f"{line_prefix}L{idx:0{digits}d}S", start_lat, start_lon))
+            survey.append((f"{line_prefix}L{idx:0{digits}d}F", end_lat, end_lon))
+
+        too_long = [name for name, _lat, _lon in survey if len(name) > MAX_WAYPOINT_NAME]
+        if too_long:
+            raise ValueError(
+                f"{len(too_long)} waypoint names would exceed the {MAX_WAYPOINT_NAME}-character "
+                f"limit a navigation database allows (e.g. {too_long[0]!r}). Shorten the Line "
+                f"ID Prefix, or reduce the line count.")
 
         # Transit waypoints bracket the survey in flight order. Identifier-only rows are
         # skipped: these files need coordinates, and ForeFlight/the FMS already know where

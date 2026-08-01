@@ -154,9 +154,13 @@ See [foreflight.md](foreflight.md) for the import rules these files are built ag
 including which claims are verified against ForeFlight's docs and which are not.
 
 ## Notes & Tips
-- **Line ID Prefix** is 1–4 letters or digits (default `1`). Waypoints come out as
-  `<prefix>L<n>S` / `<prefix>L<n>F` — Start and Finish of line n — matching the pilot's
-  `1L1S` convention. It is no longer a fixed 3-character prefix.
+- Waypoints are named `L01S` / `L01F` — Start and Finish of line 01 — widening to `L001S`
+  past 99 lines. **Five characters is the ceiling** a navigation database allows (Jeppesen
+  NavData, following ARINC 424), so the number is padded no further than it needs to be.
+- **Line ID Prefix** is optional and empty by default. One or two letters or digits go in
+  front of every name, for telling two areas apart in the same database — but they spend
+  characters from that same budget, so a prefix only fits while the line count is under 100.
+  The exporter refuses rather than truncating if a name would overflow.
 - Provide at least 3 boundary points to define the survey polygon.
 - The GUI runs one calculation at startup, so the preview and CSVs already exist before you
   click anything. The status line under the button stamps each run so repeat clicks are visible.
