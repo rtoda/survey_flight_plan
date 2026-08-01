@@ -15,7 +15,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 import numpy as np
-from shapely.geometry import LineString, Polygon, MultiLineString, GeometryCollection
+from shapely.geometry import LineString, Polygon, MultiLineString, GeometryCollection, Point
 from shapely import affinity
 from pyproj import CRS, Transformer
 import folium
@@ -101,7 +101,7 @@ def measure_clearance(target_poly, coverage_poly, samples=400):
     return 0.0 if worst is None else worst
 
 
-def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1, retrace=False):
+def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1, retrace=False, entry_xy=None, exit_xy=None):
     if len(latlon_coords) < 3:
         raise ValueError('At least three coordinates are required to define a survey area.')
 
@@ -176,25 +176,51 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
     if not pass_rows:
         raise ValueError('No pass segments could be generated. Adjust coordinates or swath width.')
 
-    cycle_segments = []
-    for row_idx, row_segments in enumerate(pass_rows):
-        # Retracing returns the aircraft to the end it started from, so the usual
-        # boustrophedon alternation is dropped: every row is entered from the same side,
-        # which keeps the turn onto the next row down to the line spacing. Alternating as
-        # well would mean crossing the full width of the box between rows.
-        reverse = (row_idx % 2 == 1) and not retrace
-        ordered = list(reversed(row_segments)) if reverse else row_segments
-        for segment in ordered:
-            # Orient each pass along the direction it is actually flown, so the exporter
-            # can name its ends Start and Finish without re-deriving the sequence.
-            oriented = sorted(segment.coords, key=lambda c: c[0])
-            if reverse:
-                oriented = oriented[::-1]
-            cycle_segments.append(LineString(oriented))
-            if retrace:
-                # The return run is its own numbered line: same ground track, opposite
-                # direction, so its Start sits on the forward pass's Finish.
-                cycle_segments.append(LineString(oriented[::-1]))
+    def assemble(flip_rows, flip_direction):
+        """One candidate pattern: which row to begin at, and which end of it."""
+        segments = []
+        rows = list(reversed(pass_rows)) if flip_rows else pass_rows
+        for row_idx, row_segments in enumerate(rows):
+            # Retracing returns the aircraft to the end it started from, so the usual
+            # boustrophedon alternation is dropped: every row is entered from the same
+            # side, which keeps the turn onto the next row down to the line spacing.
+            # Alternating as well would mean crossing the full width of the box.
+            alternate = (row_idx % 2 == 1) and not retrace
+            reverse = alternate != flip_direction        # xor
+            ordered = list(reversed(row_segments)) if reverse else row_segments
+            for segment in ordered:
+                # Orient each pass along the direction it is actually flown, so the
+                # exporter can name its ends Start and Finish without re-deriving order.
+                oriented = sorted(segment.coords, key=lambda c: c[0])
+                if reverse:
+                    oriented = oriented[::-1]
+                segments.append(LineString(oriented))
+                if retrace:
+                    # The return run is its own numbered line: same ground track, opposite
+                    # direction, so its Start sits on the forward pass's Finish.
+                    segments.append(LineString(oriented[::-1]))
+        return segments
+
+    def unrotated(point):
+        return affinity.rotate(Point(point), heading_angle_deg, origin=pivot,
+                               use_radians=False).coords[0]
+
+    # The pattern can start at either end of either extreme row -- four corners, all
+    # covering the same ground. Pick the one that makes the run in from the last transit
+    # waypoint (and the run out to the next) shortest, instead of always starting at the
+    # bottom-left and crossing the box to get there.
+    best = None
+    for flip_rows in (False, True):
+        for flip_direction in (False, True):
+            candidate = assemble(flip_rows, flip_direction)
+            cost = 0.0
+            if entry_xy is not None:
+                cost += math.dist(entry_xy, unrotated(candidate[0].coords[0]))
+            if exit_xy is not None:
+                cost += math.dist(unrotated(candidate[-1].coords[-1]), exit_xy)
+            if best is None or cost < best[0]:
+                best = (cost, candidate)
+    cycle_segments = best[1]
 
     # Repeats fly the whole box again from the top, so the line directions and sensor
     # geometry of every cycle are identical. Line numbering runs straight on through, which
@@ -1429,12 +1455,27 @@ class FlightPlannerGUI(tk.Tk):
             repeats = 1
         self.repeats.set(str(repeats))
 
-        # 5. Generate the flight pattern path
+        # 5. Transit waypoints first: the pattern needs to know which side the aircraft
+        #    arrives from before it can pick which corner of the box to start at.
+        try:
+            before = self._get_transit_points("before", waypoint_prefix)
+            after = self._get_transit_points("after", waypoint_prefix)
+        except ValueError as err:
+            messagebox.showerror("Input Error", str(err))
+            return
+
+        mapped_before = [p for p in before if p["lat"] is not None]
+        mapped_after = [p for p in after if p["lat"] is not None]
+        entry_xy = to_m.transform(mapped_before[-1]["lon"], mapped_before[-1]["lat"]) \
+            if mapped_before else None
+        exit_xy = to_m.transform(mapped_after[0]["lon"], mapped_after[0]["lat"]) \
+            if mapped_after else None
+
         try:
             survey_poly, survey_pattern, segments = build_rectangular_pattern(
                 survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m, center_lat,
                 rectangular=self.rectangular_box.get(), repeats=repeats,
-                retrace=self.retrace_lines.get()
+                retrace=self.retrace_lines.get(), entry_xy=entry_xy, exit_xy=exit_xy
             )
         except Exception as e:
             messagebox.showerror("Execution Error", str(e))
@@ -1451,13 +1492,6 @@ class FlightPlannerGUI(tk.Tk):
             messagebox.showerror("Output Folder Error", f"{out_dir}\n\n{err}")
             return
         self._output_dir = out_dir
-
-        try:
-            before = self._get_transit_points("before", waypoint_prefix)
-            after = self._get_transit_points("after", waypoint_prefix)
-        except ValueError as err:
-            messagebox.showerror("Input Error", str(err))
-            return
 
         try:
             ff_file, hw_file, waypoints, survey_waypoints = self._export_csv_files(
@@ -1539,8 +1573,6 @@ class FlightPlannerGUI(tk.Tk):
         # Transit distance covers only the rows that carry coordinates: an identifier's
         # position is unknown here, so including it would be a guess.
         if before or after:
-            mapped_before = [p for p in before if p["lat"] is not None]
-            mapped_after = [p for p in after if p["lat"] is not None]
             transit_m = 0.0
             for chain, anchor in ((mapped_before, segments[0].coords[0]),
                                   (mapped_after, segments[-1].coords[-1])):
@@ -1630,8 +1662,6 @@ class FlightPlannerGUI(tk.Tk):
             ).add_to(waypoint_layer)
         waypoint_layer.add_to(survey_map)
 
-        mapped_before = [p for p in before if p["lat"] is not None]
-        mapped_after = [p for p in after if p["lat"] is not None]
         if mapped_before or mapped_after:
             transit_layer = folium.FeatureGroup(name='Transit legs')
             for chain, anchor, leads in ((mapped_before, pattern_latlon[0], True),

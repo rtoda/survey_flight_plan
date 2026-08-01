@@ -103,6 +103,11 @@ on top of the origin and destination airports. Each row takes **either** an iden
 - A **lat/lon** row is written to both CSVs bracketing the survey waypoints, drawn on the
   preview as a grey dashed leg, and included in the transit distance.
 
+The survey box is entered at whichever corner is nearest the last transit waypoint, rather
+than always at line 1's start — approaching the default area from the north, that is a
+23.98 km run in instead of 43.55 km across the box and back. The ground covered is
+identical either way.
+
 Both coordinate grids have **Move** buttons on each row, so a new point can be slotted
 between two filled rows rather than only appended. Rows are read top to bottom. On the
 Waypoints tab that sets the order the legs are flown; on the Boundary GPS tab it reorders
