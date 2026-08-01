@@ -1574,24 +1574,65 @@ class FlightPlannerGUI(tk.Tk):
         # 9. Render dynamic map using Folium
         survey_map = folium.Map(location=[center_lat, center_lon], zoom_start=12)
 
-        # Hull Perimeter Boundaries (Blue Envelope)
+        # Colours match the canvas preview so the two views read the same way. Each group
+        # is its own FeatureGroup, so LayerControl can switch it off -- the only sane way
+        # to cope with a dense survey putting 50+ markers on the map.
         hull_latlon = xy_to_latlon(list(survey_poly.exterior.coords))
-        folium.PolyLine(hull_latlon, color='blue', weight=3, opacity=0.7, tooltip='Target Buffer Envelope').add_to(survey_map)
+        folium.PolyLine(hull_latlon, color='#1f6fd0', weight=3, opacity=0.7,
+                        tooltip='Target buffer envelope').add_to(survey_map)
 
-        # Input GPS Waypoint Marks (Purple Icons)
-        for idx, point in enumerate(survey_boundary, start=1):
-            lat, lon = point[0], point[1]
-            wp_name = point[2]
+        pattern_latlon = xy_to_latlon(list(survey_pattern.coords))
+        folium.PolyLine(pattern_latlon, color='#d81b1b', weight=4, opacity=0.9,
+                        dash_array='5, 6', tooltip='Survey flight track').add_to(survey_map)
+
+        boundary_layer = folium.FeatureGroup(name='Boundary points')
+        for point in survey_boundary:
+            lat, lon, wp_name = point[0], point[1], point[2]
             folium.Marker(
                 location=[lat, lon],
                 popup=f"{wp_name}: ({lat:.5f}, {lon:.5f})",
                 tooltip=wp_name,
                 icon=folium.Icon(color='purple', icon='info-sign')
-            ).add_to(survey_map)
+            ).add_to(boundary_layer)
+        boundary_layer.add_to(survey_map)
 
-        # Track Flight Path Overlay (Red Strip)
-        pattern_latlon = xy_to_latlon(list(survey_pattern.coords))
-        folium.PolyLine(pattern_latlon, color='red', weight=4, opacity=0.9, dash_array='5, 6', tooltip='Flight Track').add_to(survey_map)
+        # Labels ride along permanently while there are few enough to read; past that they
+        # would be an unreadable mat, so they fall back to hover.
+        label_always = len(survey_waypoints) <= 24
+        waypoint_layer = folium.FeatureGroup(name='Survey waypoints')
+        for name, lat, lon in survey_waypoints:
+            folium.CircleMarker(
+                location=[lat, lon], radius=4, color='#d81b1b', weight=1,
+                fill=True, fill_color='#d81b1b', fill_opacity=0.9,
+                tooltip=folium.Tooltip(name, permanent=label_always, direction='right'),
+                popup=f"{name}<br>{lat:.6f}, {lon:.6f}",
+            ).add_to(waypoint_layer)
+        waypoint_layer.add_to(survey_map)
+
+        mapped_before = [p for p in before if p["lat"] is not None]
+        mapped_after = [p for p in after if p["lat"] is not None]
+        if mapped_before or mapped_after:
+            transit_layer = folium.FeatureGroup(name='Transit legs')
+            for chain, anchor, leads in ((mapped_before, pattern_latlon[0], True),
+                                         (mapped_after, pattern_latlon[-1], False)):
+                if not chain:
+                    continue
+                points = [(p["lat"], p["lon"]) for p in chain]
+                leg = points + [anchor] if leads else [anchor] + points
+                folium.PolyLine(leg, color='#8a8a8a', weight=3, opacity=0.9,
+                                dash_array='2, 8',
+                                tooltip='Transit to the box' if leads
+                                        else 'Transit from the box').add_to(transit_layer)
+                for p in chain:
+                    folium.CircleMarker(
+                        location=[p["lat"], p["lon"]], radius=5, color='#444444', weight=2,
+                        fill=True, fill_color='#8a8a8a', fill_opacity=0.9,
+                        tooltip=folium.Tooltip(p["name"], permanent=True, direction='right'),
+                        popup=f"{p['name']}<br>{p['lat']:.6f}, {p['lon']:.6f}",
+                    ).add_to(transit_layer)
+            transit_layer.add_to(survey_map)
+
+        folium.LayerControl(collapsed=False).add_to(survey_map)
 
         # 10. Save the interactive map for the browser button (Leaflet needs a real browser)
         self._map_path = os.path.join(out_dir, f"{area_name}_flight_path.html")

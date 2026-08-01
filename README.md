@@ -123,7 +123,9 @@ git-ignored — it is all regenerable, so nothing there is precious:
 
 - `<AREA>_waypoints_foreflight.csv` — waypoint list in ForeFlight's column order
 - `<AREA>_waypoints_honeywell.csv` — Honeywell FMS formatted CSV
-- `<AREA>_flight_path.html` — Folium map (open with the button, or double-click the file)
+- `<AREA>_flight_path.html` — Folium map over real terrain, with the survey waypoints,
+  transit legs and boundary points on separate toggleable layers (open with the
+  button, or double-click the file)
 - `<AREA>_survey.kml` / `.kmz` — survey pattern as a ForeFlight **map layer**: AirDrop or
   email it and the lines, buffer and named points display as a toggleable overlay without
   entering the waypoint database
