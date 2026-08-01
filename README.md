@@ -88,6 +88,17 @@ but lines of very uneven length.
 cycle. The names repeat each cycle, because a name is a place rather than a step in the
 sequence.
 
+**Skip Edge Lines (each end)** drops that many lines from *both* sides of the box — 1 turns
+11 lines into 9, removing the outermost pass on each side. The outer lines are the ones
+mostly over the perimeter margin rather than the target, so this buys back flight time where
+the least is burning. The lines that remain renumber from 1.
+
+It gives up real coverage, and the summary says so: **Actual Padding** falls by roughly the
+line spacing for each line skipped and reads `TARGET NOT FULLY COVERED (n km outside)` once
+the target itself is being clipped. That figure is measured against the ground actually
+covered, not assumed, so trust it. Asking for more lines than the area has is refused with a
+message rather than quietly flying whatever is left.
+
 **Lead-in Distance** puts a waypoint that far back from the first line's start, along that
 line's own bearing, so the aircraft rolls out wings-level and is established on track before
 the line — and the sensor run — begins. It is named `IL01` (intercept, line 1), so the

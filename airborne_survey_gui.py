@@ -111,7 +111,7 @@ def measure_clearance(target_poly, coverage_poly, samples=400):
     return 0.0 if worst is None else worst
 
 
-def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1, retrace=False, entry_xy=None, exit_xy=None):
+def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1, retrace=False, entry_xy=None, exit_xy=None, skip_edges=0):
     if len(latlon_coords) < 3:
         raise ValueError('At least three coordinates are required to define a survey area.')
 
@@ -177,14 +177,42 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
     # One row per pass line. A concave coverage shape can split a row into several
     # segments, so rows are kept grouped and ordered along the row before sequencing.
     pass_rows = []
+    row_ys = []
     for current_y in candidate_ys:
         pass_line = LineString([(minx - 10000, current_y), (maxx + 10000, current_y)])
         segments = flatten_linestrings(pass_line.intersection(clip_region))
         if segments:
             pass_rows.append(sorted(segments, key=lambda s: s.centroid.x))
+            row_ys.append(current_y)
 
     if not pass_rows:
         raise ValueError('No pass segments could be generated. Adjust coordinates or swath width.')
+
+    # Dropping the outermost rows on both sides. The remaining rows renumber from 1 by
+    # falling out of assemble()'s enumerate, which is what should happen -- the plan that
+    # gets flown is the plan, and its lines read 1..n.
+    #
+    # This is real coverage given up, so skip_band trims the region reported as flown.
+    # Without it measure_clearance would keep measuring against the full box and the summary
+    # would go on claiming a perimeter margin that is no longer being flown -- the one way
+    # this feature could actually hurt someone. Left as None when nothing is skipped, so
+    # existing plans report exactly what they did before.
+    skip_band = None
+    skip_edges = max(0, int(skip_edges))
+    if skip_edges > 0:
+        keep = len(pass_rows) - 2 * skip_edges
+        if keep < 1:
+            raise ValueError(
+                f'Skipping {skip_edges} line(s) at each end leaves nothing to fly: this '
+                f'area only makes {len(pass_rows)} line(s). Reduce the skip, narrow the '
+                f'swath, or widen the perimeter margin.')
+        pass_rows = pass_rows[skip_edges:skip_edges + keep]
+        row_ys = row_ys[skip_edges:skip_edges + keep]
+        # The retained lines cover their own band plus half a swath beyond the outermost
+        # on each side. Built in the rotated frame like everything else here.
+        half_swath = swath_km * 1000.0 / 2.0
+        lo, hi = row_ys[0] - half_swath, row_ys[-1] + half_swath
+        skip_band = Polygon([(minx, lo), (maxx, lo), (maxx, hi), (minx, hi)])
 
     def assemble(flip_rows, flip_direction):
         """One candidate pattern: which row to begin at, and which end of it.
@@ -265,6 +293,12 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
     # Report the region actually flown, so the preview, KML and clearance check all agree.
     flown_region = affinity.rotate(clip_region, heading_angle_deg, origin=pivot,
                                    use_radians=False) if rectangular else coverage
+    # Applied after the mode choice so it trims either shape, and rotated with the same
+    # pivot as everything else -- the margin bug this file already carries a section about
+    # was exactly a second pivot creeping in.
+    if skip_band is not None:
+        flown_region = flown_region.intersection(
+            affinity.rotate(skip_band, heading_angle_deg, origin=pivot, use_radians=False))
     return flown_region, rotated_pattern, flown_segments, line_numbers
 
 # --- FOREFLIGHT KML / CONTENT PACK EXPORT ---
@@ -544,6 +578,9 @@ class FlightPlannerGUI(tk.Tk):
         # written, leaving the survey box alone. Deliberately NOT a different calculation:
         # see calculate_and_render for why the transit points still steer the geometry.
         self.survey_only = tk.BooleanVar(value=False)
+        # Rows dropped from each end of the box. Trades coverage at the edges for flight
+        # time; the summary reports the padding that survives, which may go negative.
+        self.skip_edges = tk.StringVar(value="0")
 
         # QR view replaces the flight path in the same pane, so the code gets the full
         # width -- a dense survey needs every pixel per module to stay scannable.
@@ -667,6 +704,24 @@ class FlightPlannerGUI(tk.Tk):
                 "at the end you started from, so every row is entered from the same side "
                 "and the turn between rows stays short.")
 
+        skip_label = ttk.Label(param_tab, text="Skip Edge Lines (each end):")
+        skip_label.grid(row=8, column=0, sticky="w", pady=5)
+        skip_box = ttk.Combobox(param_tab, width=12, state="readonly",
+                                values=("0", "1", "2", "3"), textvariable=self.skip_edges)
+        skip_box.grid(row=8, column=1, sticky="w", pady=5, padx=10)
+        skip_box.bind("<<ComboboxSelected>>", lambda _e: self.calculate_and_render())
+        skip_tip = ("Drop this many lines from EACH end of the box — 1 turns 7 lines into "
+                    "5, removing the outermost pass on both sides.\n\n"
+                    "The outer lines are the ones mostly over the perimeter margin rather "
+                    "than the target, so this buys back flight time where the least is "
+                    "burning. The remaining lines renumber from 1.\n\n"
+                    "It gives up real coverage: Actual Padding in the summary drops by the "
+                    "line spacing for each one skipped, and will read TARGET NOT FULLY "
+                    "COVERED once the target itself is being clipped. Trust that figure — "
+                    "it is measured, not assumed.")
+        ToolTip(skip_box, skip_tip)
+        ToolTip(skip_label, skip_tip)
+
         fields = [
             ("Groundspeed (knots):", "groundspeed_kt", "200"),
             ("Swath Width (km):", "swath_width_km", "10.0"),
@@ -688,10 +743,10 @@ class FlightPlannerGUI(tk.Tk):
             ("Survey Flight Level:", "survey_altitude", "200"),
         ]
 
-        # Starts below the checkbox rows: 4 rectangular box, 5 repeats, 6 retrace,
-        # 7 survey-box-only. Adding a checkbox means moving this, or the first field lands
-        # in the same cell and the two overlap.
-        for i, (label_text, dict_key, default_val) in enumerate(fields, start=8):
+        # Starts below the rows above: 4 rectangular box, 5 repeats, 6 retrace,
+        # 7 survey-box-only, 8 skip edge lines. Adding a control means moving this, or the
+        # first field lands in the same cell and Tk silently overlaps the two.
+        for i, (label_text, dict_key, default_val) in enumerate(fields, start=9):
             ttk.Label(param_tab, text=label_text).grid(row=i, column=0, sticky="w", pady=5)
             entry = ttk.Entry(param_tab, width=15)
             entry.insert(0, default_val)
@@ -1374,6 +1429,7 @@ class FlightPlannerGUI(tk.Tk):
             "repeats": self.repeats.get(),
             "retrace_lines": self.retrace_lines.get(),
             "survey_only": self.survey_only.get(),
+            "skip_edges": self.skip_edges.get(),
             "boundary": boundary,
             "transit": {
                 group: [{"ident": i.get().strip(), "lat": la.get().strip(),
@@ -1407,6 +1463,12 @@ class FlightPlannerGUI(tk.Tk):
             self.retrace_lines.set(bool(data["retrace_lines"]))
         if "survey_only" in data:
             self.survey_only.set(bool(data["survey_only"]))
+        if "skip_edges" in data:
+            # Clamped to the dropdown's range in case the file was hand-edited.
+            try:
+                self.skip_edges.set(str(min(3, max(0, int(float(data["skip_edges"]))))))
+            except (TypeError, ValueError):
+                self.skip_edges.set("0")
         if "repeats" in data:
             try:
                 self.repeats.set(str(min(4, max(1, int(float(data["repeats"]))))))
@@ -1569,6 +1631,13 @@ class FlightPlannerGUI(tk.Tk):
             repeats = 1
         self.repeats.set(str(repeats))
 
+        # Same guard as repeats: read-only combobox, so this only catches a hand-edited plan.
+        try:
+            skip_edges = max(0, int(float(self.skip_edges.get())))
+        except ValueError:
+            skip_edges = 0
+        self.skip_edges.set(str(skip_edges))
+
         # 5. Transit waypoints first: the pattern needs to know which side the aircraft
         #    arrives from before it can pick which corner of the box to start at.
         try:
@@ -1601,7 +1670,8 @@ class FlightPlannerGUI(tk.Tk):
             survey_poly, survey_pattern, segments, line_numbers = build_rectangular_pattern(
                 survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m, center_lat,
                 rectangular=self.rectangular_box.get(), repeats=repeats,
-                retrace=self.retrace_lines.get(), entry_xy=entry_xy, exit_xy=exit_xy
+                retrace=self.retrace_lines.get(), entry_xy=entry_xy, exit_xy=exit_xy,
+                skip_edges=skip_edges
             )
         except Exception as e:
             messagebox.showerror("Execution Error", str(e))
@@ -1692,6 +1762,8 @@ class FlightPlannerGUI(tk.Tk):
             if self.retrace_lines.get() else "Retrace: off",
             # Distinct lines, then how many passes are flown over them.
             f"Survey Lines: {max(line_numbers)}   ({len(segments)} passes)",
+            f"Skipped Edges: {skip_edges} per end ({2 * skip_edges} lines dropped)"
+            if skip_edges else "Skipped Edges: none",
             # Distinguish "you set it to 0" from "it is set but this view suppresses it",
             # or the panel reads as though the lead-in had been lost.
             f"Lead-in: {lead_in_km:.2f} km on the line bearing" if lead_xy is not None
