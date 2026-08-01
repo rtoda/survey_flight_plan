@@ -36,6 +36,12 @@ TRANSIT_ROWS = 6
 # not a style question: the box will not take it.
 MAX_WAYPOINT_NAME = 5
 
+# The pilot's box will not take a longer list than this -- his number, and he said "for now",
+# so treat it as a setting that may move rather than a law like the five-character ceiling.
+# Warned about rather than enforced: the file is still written, because the limit is his
+# equipment's and the plan may be for someone else's.
+MAX_FMS_WAYPOINTS = 123
+
 # --- SURVEY ENGINE CONFIGURATION & HELPERS ---
 
 def dd_to_honeywell_format(value, positive_indicator, negative_indicator, degree_digits=2):
@@ -534,6 +540,10 @@ class FlightPlannerGUI(tk.Tk):
         self.rectangular_box = tk.BooleanVar(value=True)
         self.repeats = tk.StringVar(value="1")
         self.retrace_lines = tk.BooleanVar(value=False)
+        # Strips the lead-in and the transit legs out of everything that gets drawn or
+        # written, leaving the survey box alone. Deliberately NOT a different calculation:
+        # see calculate_and_render for why the transit points still steer the geometry.
+        self.survey_only = tk.BooleanVar(value=False)
 
         # QR view replaces the flight path in the same pane, so the code gets the full
         # width -- a dense survey needs every pixel per module to stay scannable.
@@ -621,9 +631,9 @@ class FlightPlannerGUI(tk.Tk):
         repeats_box.bind("<<ComboboxSelected>>", lambda _e: self.calculate_and_render())
         repeats_tip = ("How many times to fly the whole box.\n\n"
                        "Each cycle repeats the same lines in the same directions, so sensor "
-                       "geometry matches between cycles. Line numbering continues across "
-                       "them — 3 lines flown twice gives 1L1S through 1L6F — so every "
-                       "waypoint name stays unique and in flight order.\n\n"
+                       "geometry matches between cycles. Each cycle reuses the same names, "
+                       "because a name identifies an end of a line rather than a step in "
+                       "the sequence — 3 lines flown twice is SL01..NL03 over again.\n\n"
                        "The transit back to line 1 carries no waypoint.")
         ToolTip(repeats_box, repeats_tip)
         ToolTip(repeats_label, repeats_tip)
@@ -632,11 +642,25 @@ class FlightPlannerGUI(tk.Tk):
                                         variable=self.retrace_lines,
                                         command=self.calculate_and_render)
         retrace_check.grid(row=6, column=1, sticky="w", padx=10)
+        survey_only_check = ttk.Checkbutton(param_tab, text="Survey box only",
+                                            variable=self.survey_only,
+                                            command=self.calculate_and_render)
+        survey_only_check.grid(row=7, column=1, sticky="w", padx=10)
+        ToolTip(survey_only_check,
+                "Show and export the survey lines alone — no lead-in waypoint, no transit "
+                "legs. For working on the box without the run-in cluttering the view.\n\n"
+                "The survey itself does not change. The transit points are still read and "
+                "still decide which corner the box starts at, so the lines, their names and "
+                "their order are identical with this on or off — only what gets drawn and "
+                "written is filtered.\n\n"
+                "Distances drop to the survey alone, so the total no longer reflects the "
+                "whole sortie. Turn it off before sending anything to the pilot.")
         ToolTip(retrace_check,
                 "Fly each line out and back before moving to the next one, instead of "
                 "once through.\n\n"
-                "The return run is numbered as its own line, so three rows become six: "
-                "1L1 out, 1L2 back over the same ground, 1L3 out on the next row.\n\n"
+                "The return run keeps its line's number and revisits its two names, so "
+                "three rows read SL01, NL01, SL01, SL02, NL02, SL02, ... — the turnaround "
+                "listed once.\n\n"
                 "Distance on the lines doubles; the turns between rows do not, so the "
                 "total grows by less than 2x — 78 km becomes 139 km on the default area.\n\n"
                 "Rows are no longer alternated when this is on — retracing puts you back "
@@ -664,7 +688,10 @@ class FlightPlannerGUI(tk.Tk):
             ("Survey Flight Level:", "survey_altitude", "200"),
         ]
 
-        for i, (label_text, dict_key, default_val) in enumerate(fields, start=7):
+        # Starts below the checkbox rows: 4 rectangular box, 5 repeats, 6 retrace,
+        # 7 survey-box-only. Adding a checkbox means moving this, or the first field lands
+        # in the same cell and the two overlap.
+        for i, (label_text, dict_key, default_val) in enumerate(fields, start=8):
             ttk.Label(param_tab, text=label_text).grid(row=i, column=0, sticky="w", pady=5)
             entry = ttk.Entry(param_tab, width=15)
             entry.insert(0, default_val)
@@ -788,6 +815,10 @@ class FlightPlannerGUI(tk.Tk):
         ttk.Label(left_frame, text="Flight Path Summary Output", font=("Helvetica", 10, "bold")).grid(row=4, column=0, columnspan=2, pady=(10, 2), sticky="w")
         self.stats_text = tk.Text(left_frame, width=45, height=15, wrap=tk.WORD, font=("Courier", 11))
         self.stats_text.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=5)
+        # Used for the over-limit banner. The panel is a wall of Courier, so a warning set
+        # in the same weight and colour as everything else reads as just another row.
+        self.stats_text.tag_configure("warn", foreground="#b00020",
+                                      font=("Courier", 11, "bold"))
 
         left_frame.columnconfigure(0, weight=1)
         left_frame.rowconfigure(5, weight=1)
@@ -1342,6 +1373,7 @@ class FlightPlannerGUI(tk.Tk):
             "rectangular_box": self.rectangular_box.get(),
             "repeats": self.repeats.get(),
             "retrace_lines": self.retrace_lines.get(),
+            "survey_only": self.survey_only.get(),
             "boundary": boundary,
             "transit": {
                 group: [{"ident": i.get().strip(), "lat": la.get().strip(),
@@ -1373,6 +1405,8 @@ class FlightPlannerGUI(tk.Tk):
             self.rectangular_box.set(bool(data["rectangular_box"]))
         if "retrace_lines" in data:
             self.retrace_lines.set(bool(data["retrace_lines"]))
+        if "survey_only" in data:
+            self.survey_only.set(bool(data["survey_only"]))
         if "repeats" in data:
             try:
                 self.repeats.set(str(min(4, max(1, int(float(data["repeats"]))))))
@@ -1551,6 +1585,18 @@ class FlightPlannerGUI(tk.Tk):
         exit_xy = to_m.transform(mapped_after[0]["lon"], mapped_after[0]["lat"]) \
             if mapped_after else None
 
+        # "Survey box only" filters the output; it does not plan a different flight. The
+        # entry/exit hints above are taken from the real transit points first, so the corner
+        # the box starts at -- and therefore the lines, their names and their order -- comes
+        # out identical either way. Dropping the lists here means nothing downstream (CSV,
+        # KML, content pack, route link, preview, Folium map) sees them, with no per-consumer
+        # flag to keep in step. If this ran before the hints, ticking a view checkbox would
+        # silently move the survey, which is exactly the trap worth avoiding.
+        survey_only = self.survey_only.get()
+        if survey_only:
+            before = after = []
+            mapped_before = mapped_after = []
+
         try:
             survey_poly, survey_pattern, segments, line_numbers = build_rectangular_pattern(
                 survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m, center_lat,
@@ -1574,7 +1620,9 @@ class FlightPlannerGUI(tk.Tk):
         self._output_dir = out_dir
 
         # The lead-in is flown, so it belongs on the path as well as in the waypoint list.
-        lead_xy = lead_in_point(segments[0], lead_in_km) if segments else None
+        # It sits outside the box, so "survey box only" suppresses it along with the transit.
+        lead_xy = lead_in_point(segments[0], lead_in_km) \
+            if segments and not survey_only else None
         if lead_xy is not None:
             survey_pattern = LineString([lead_xy] + list(survey_pattern.coords))
 
@@ -1644,8 +1692,13 @@ class FlightPlannerGUI(tk.Tk):
             if self.retrace_lines.get() else "Retrace: off",
             # Distinct lines, then how many passes are flown over them.
             f"Survey Lines: {max(line_numbers)}   ({len(segments)} passes)",
+            # Distinguish "you set it to 0" from "it is set but this view suppresses it",
+            # or the panel reads as though the lead-in had been lost.
             f"Lead-in: {lead_in_km:.2f} km on the line bearing" if lead_xy is not None
-            else "Lead-in: off",
+            else f"Lead-in: {lead_in_km:.2f} km, hidden by Survey box only"
+            if survey_only and lead_in_km > 0 else "Lead-in: off",
+            "Scope: SURVEY BOX ONLY — lead-in and transit excluded" if survey_only
+            else "Scope: full plan",
             f"Ground Heading: {heading:.1f}° True",
             f"Requested Margin: {margin:.2f} km",
             margin_note,
@@ -1654,6 +1707,7 @@ class FlightPlannerGUI(tk.Tk):
             # Row count of both CSVs, after consecutive duplicate names are collapsed --
             # what the pilot actually loads, not the number of line ends the geometry has.
             f"Waypoints in CSV: {len(waypoints)}"
+            + (f" / {MAX_FMS_WAYPOINTS} max" if len(waypoints) > MAX_FMS_WAYPOINTS else "")
             + (f"   ({len(survey_waypoints)} survey + "
                f"{len(waypoints) - len(survey_waypoints)} transit)"
                if len(waypoints) != len(survey_waypoints) else ""),
@@ -1693,6 +1747,19 @@ class FlightPlannerGUI(tk.Tk):
             stats_output.append(f"Segment {idx:02d}: {dm/1000:.1f} km | {tmin:.1f} min")
 
         self.stats_text.insert(tk.END, "\n".join(stats_output))
+
+        # A file the pilot's box will not load is the one thing here worth interrupting for,
+        # so it goes to the top of the panel in red rather than taking its turn in the list.
+        # Not a modal: the count is exceeded by ordinary settings (0.75 km swath, or retrace
+        # with repeats), and a dialog on every recalculation would train him to dismiss it.
+        over_limit = len(waypoints) > MAX_FMS_WAYPOINTS
+        if over_limit:
+            self.stats_text.insert(
+                "1.0",
+                f"!! {len(waypoints)} waypoints — the pilot's software takes "
+                f"{MAX_FMS_WAYPOINTS}.\n"
+                f"   Widen the swath, cut repeats, or turn retrace off.\n\n",
+                "warn")
 
         # 8. Refresh the in-window preview (UTM metres, matching the geometry engine)
         self._preview = {
@@ -1808,7 +1875,9 @@ class FlightPlannerGUI(tk.Tk):
         self.status_var.set(
             f"Generated {generated_utc} (run #{self._run_count}) into "
             f"{PLANS_DIR}{os.sep}{area_name}{os.sep}: "
-            f"{len(segments)} lines, {len(waypoints)} waypoints, {dist_nm:.1f} nm, "
+            f"{len(segments)} lines, {len(waypoints)} waypoints"
+            f"{f' (OVER {MAX_FMS_WAYPOINTS} LIMIT)' if over_limit else ''}"
+            f"{' [survey box only]' if survey_only else ''}, {dist_nm:.1f} nm, "
             f"{clearance_m/1000:.2f} km padding{' (SHORT — check offsets)' if short else ''}. "
             f"Send {os.path.basename(pack_file)} to the pilot."
         )

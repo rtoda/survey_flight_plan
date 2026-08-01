@@ -130,6 +130,19 @@ when transit rows are filled. It counts what the pilot actually loads, so consec
 duplicate names are already collapsed and identifier-only transit rows are excluded, since
 those carry no position and are never written.
 
+Past **123 waypoints** a red banner appears at the top of the summary panel and the status
+line flags `OVER LIMIT` — that is the ceiling the pilot's software currently accepts. The
+files are still written: the limit belongs to his equipment, and the plan may be for someone
+else's. Ordinary settings can exceed it (a 0.75 km swath, or retrace with repeats), so it is
+a warning rather than a dialog. Widen the swath, cut repeats, or turn retrace off.
+
+**Survey box only** strips the lead-in and the transit legs out of everything drawn and
+written, leaving just the survey lines — for working on the box without the run-in cluttering
+the view. **The survey itself does not change.** The transit points are still read and still
+decide which corner the box is entered at, so the lines, their names and their order are
+identical with it on or off; only the output is filtered. Distances drop to the survey alone,
+so turn it off before sending anything to the pilot.
+
 The perimeter margin is applied to the target before the box is taken, so the requested
 padding clears the boundary on all sides at any heading. The summary panel reports the
 padding actually achieved — trust that figure over the requested one, since a non-zero
