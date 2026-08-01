@@ -96,7 +96,7 @@ def measure_clearance(target_poly, coverage_poly, samples=400):
     return 0.0 if worst is None else worst
 
 
-def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1):
+def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1, retrace=False):
     if len(latlon_coords) < 3:
         raise ValueError('At least three coordinates are required to define a survey area.')
 
@@ -173,7 +173,11 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
 
     cycle_segments = []
     for row_idx, row_segments in enumerate(pass_rows):
-        reverse = row_idx % 2 == 1
+        # Retracing returns the aircraft to the end it started from, so the usual
+        # boustrophedon alternation is dropped: every row is entered from the same side,
+        # which keeps the turn onto the next row down to the line spacing. Alternating as
+        # well would mean crossing the full width of the box between rows.
+        reverse = (row_idx % 2 == 1) and not retrace
         ordered = list(reversed(row_segments)) if reverse else row_segments
         for segment in ordered:
             # Orient each pass along the direction it is actually flown, so the exporter
@@ -182,6 +186,10 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
             if reverse:
                 oriented = oriented[::-1]
             cycle_segments.append(LineString(oriented))
+            if retrace:
+                # The return run is its own numbered line: same ground track, opposite
+                # direction, so its Start sits on the forward pass's Finish.
+                cycle_segments.append(LineString(oriented[::-1]))
 
     # Repeats fly the whole box again from the top, so the line directions and sensor
     # geometry of every cycle are identical. Line numbering runs straight on through, which
@@ -448,6 +456,7 @@ class FlightPlannerGUI(tk.Tk):
         # which covers less ground but gives lines of very uneven length.
         self.rectangular_box = tk.BooleanVar(value=True)
         self.repeats = tk.StringVar(value="1")
+        self.retrace_lines = tk.BooleanVar(value=False)
 
         # QR view replaces the flight path in the same pane, so the code gets the full
         # width -- a dense survey needs every pixel per module to stay scannable.
@@ -536,6 +545,21 @@ class FlightPlannerGUI(tk.Tk):
         ToolTip(repeats_box, repeats_tip)
         ToolTip(repeats_label, repeats_tip)
 
+        retrace_check = ttk.Checkbutton(param_tab, text="Retrace line",
+                                        variable=self.retrace_lines,
+                                        command=self.calculate_and_render)
+        retrace_check.grid(row=6, column=1, sticky="w", padx=10)
+        ToolTip(retrace_check,
+                "Fly each line out and back before moving to the next one, instead of "
+                "once through.\n\n"
+                "The return run is numbered as its own line, so three rows become six: "
+                "1L1 out, 1L2 back over the same ground, 1L3 out on the next row.\n\n"
+                "Distance on the lines doubles; the turns between rows do not, so the "
+                "total grows by less than 2x — 78 km becomes 139 km on the default area.\n\n"
+                "Rows are no longer alternated when this is on — retracing puts you back "
+                "at the end you started from, so every row is entered from the same side "
+                "and the turn between rows stays short.")
+
         fields = [
             ("Groundspeed (knots):", "groundspeed_kt", "200"),
             ("Swath Width (km):", "swath_width_km", "10.0"),
@@ -554,7 +578,7 @@ class FlightPlannerGUI(tk.Tk):
             ("Survey Flight Level:", "survey_altitude", "200"),
         ]
 
-        for i, (label_text, dict_key, default_val) in enumerate(fields, start=6):
+        for i, (label_text, dict_key, default_val) in enumerate(fields, start=7):
             ttk.Label(param_tab, text=label_text).grid(row=i, column=0, sticky="w", pady=5)
             entry = ttk.Entry(param_tab, width=15)
             entry.insert(0, default_val)
@@ -1199,6 +1223,7 @@ class FlightPlannerGUI(tk.Tk):
             "parameters": {key: entry.get().strip() for key, entry in self.inputs.items()},
             "rectangular_box": self.rectangular_box.get(),
             "repeats": self.repeats.get(),
+            "retrace_lines": self.retrace_lines.get(),
             "boundary": boundary,
             "transit": {
                 group: [{"ident": i.get().strip(), "lat": la.get().strip(),
@@ -1228,6 +1253,8 @@ class FlightPlannerGUI(tk.Tk):
 
         if "rectangular_box" in data:
             self.rectangular_box.set(bool(data["rectangular_box"]))
+        if "retrace_lines" in data:
+            self.retrace_lines.set(bool(data["retrace_lines"]))
         if "repeats" in data:
             try:
                 self.repeats.set(str(min(4, max(1, int(float(data["repeats"]))))))
@@ -1389,7 +1416,8 @@ class FlightPlannerGUI(tk.Tk):
         try:
             survey_poly, survey_pattern, segments = build_rectangular_pattern(
                 survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m, center_lat,
-                rectangular=self.rectangular_box.get(), repeats=repeats
+                rectangular=self.rectangular_box.get(), repeats=repeats,
+                retrace=self.retrace_lines.get()
             )
         except Exception as e:
             messagebox.showerror("Execution Error", str(e))
@@ -1469,6 +1497,10 @@ class FlightPlannerGUI(tk.Tk):
             f"Active Vertices parsed: {len(survey_boundary)}",
             f"Pattern: {'Rectangular box' if self.rectangular_box.get() else 'Clipped to target outline'}",
             f"Repeats: {repeats}x  ({len(segments) // repeats} lines per cycle)",
+            # With retrace on, half the "lines" are return runs over ground already flown,
+            # so spell out how many distinct tracks that actually is.
+            f"Retrace: on — {len(segments) // (repeats * 2)} rows flown out and back"
+            if self.retrace_lines.get() else "Retrace: off",
             f"Generated Survey Lines: {len(segments)}",
             f"Ground Heading: {heading:.1f}° True",
             f"Requested Margin: {margin:.2f} km",

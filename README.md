@@ -87,6 +87,11 @@ but lines of very uneven length.
 **Repeats** (1–4) flies the whole box that many times, with identical line directions each
 cycle. Line numbering continues across cycles, so waypoint names stay unique.
 
+**Retrace line** flies each row out and back before moving to the next, rather than once
+through. The return run is numbered as its own line, so three rows become `1L1S`…`1L6F`.
+Distance on the lines doubles; the turns between rows do not, so the total grows by less
+than 2x.
+
 The **Waypoints** tab adds transit legs flown before reaching the box and after leaving it,
 on top of the origin and destination airports. Each row takes **either** an identifier
 (`BOI`, `DANDD`) **or** a lat/lon pair:
