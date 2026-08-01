@@ -124,6 +124,12 @@ at least one letter, no spaces — so `entry gate` becomes `ENTRY_GATE`. Anythin
 be salvaged falls back to a generated name like `B02`. The summary reports survey and
 transit distance separately.
 
+**Waypoints in CSV** on the summary panel, and the status line under the button, give the
+total number of points written — the row count of both CSVs, split into survey and transit
+when transit rows are filled. It counts what the pilot actually loads, so consecutive
+duplicate names are already collapsed and identifier-only transit rows are excluded, since
+those carry no position and are never written.
+
 The perimeter margin is applied to the target before the box is taken, so the requested
 padding clears the boundary on all sides at any heading. The summary panel reports the
 padding actually achieved — trust that figure over the requested one, since a non-zero

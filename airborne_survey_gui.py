@@ -1651,6 +1651,12 @@ class FlightPlannerGUI(tk.Tk):
             margin_note,
             f"Survey Path: {dist_m/1000:.2f} km ({dist_nm:.2f} nm)",
             f"Est. Survey Time: {time_min:.1f} min",
+            # Row count of both CSVs, after consecutive duplicate names are collapsed --
+            # what the pilot actually loads, not the number of line ends the geometry has.
+            f"Waypoints in CSV: {len(waypoints)}"
+            + (f"   ({len(survey_waypoints)} survey + "
+               f"{len(waypoints) - len(survey_waypoints)} transit)"
+               if len(waypoints) != len(survey_waypoints) else ""),
             f"Wrote Output: {os.path.basename(ff_file)}",
             f"Wrote Output: {os.path.basename(hw_file)}",
             f"ForeFlight layer: {os.path.basename(kml_file)}",
@@ -1802,7 +1808,7 @@ class FlightPlannerGUI(tk.Tk):
         self.status_var.set(
             f"Generated {generated_utc} (run #{self._run_count}) into "
             f"{PLANS_DIR}{os.sep}{area_name}{os.sep}: "
-            f"{len(segments)} lines, {dist_nm:.1f} nm, "
+            f"{len(segments)} lines, {len(waypoints)} waypoints, {dist_nm:.1f} nm, "
             f"{clearance_m/1000:.2f} km padding{' (SHORT — check offsets)' if short else ''}. "
             f"Send {os.path.basename(pack_file)} to the pilot."
         )
