@@ -18,7 +18,11 @@ import numpy as np
 from shapely.geometry import LineString, Polygon, MultiLineString, GeometryCollection, Point
 from shapely import affinity
 from pyproj import CRS, Transformer
-import folium
+
+# folium is imported lazily inside calculate_and_render's render_map(). It costs ~1.1 s of
+# import on its own -- it pulls in the whole of pandas -- and only the HTML map needs it, so
+# paying for it at module scope delayed every launch. Startup time matters here because the
+# app ships to the pilot as a PyInstaller build. Keep it out of the module header.
 
 # Generated output lives under here, one directory per named plan, so it never litters
 # the project root. Git-ignored wholesale.
@@ -510,6 +514,8 @@ class FlightPlannerGUI(tk.Tk):
         # plus the path of the last saved Folium map for the "open in browser" button.
         self._preview = None
         self._map_path = None
+        # Closure that writes the Folium map, outstanding until the idle queue runs it.
+        self._pending_map = None
         self._output_dir = None
         self._run_count = 0
 
@@ -848,7 +854,37 @@ class FlightPlannerGUI(tk.Tk):
         for sequence in ("<Button-3>", "<Button-2>"):
             self.preview_canvas.bind(sequence, self._reset_zoom)
 
+    def _flush_map(self):
+        """Write the deferred Folium map if one is outstanding.
+
+        Runs off the idle queue after a calculation, and synchronously from anything that
+        needs the file to exist. The pending closure is cleared *before* it runs, so a
+        failure reports once rather than being retried by the next caller.
+        """
+        render, self._pending_map = self._pending_map, None
+        if render is None:
+            return
+        try:
+            render()
+        except Exception as err:
+            messagebox.showerror("Map Not Written", f"{self._map_path}\n\n{err}")
+
+    def destroy(self):
+        """Settle the deferred map before the window goes away.
+
+        The idle callback is dropped on exit, so quitting straight after a run would leave
+        the plan folder one file short of what it advertises. Costs nothing in the normal
+        case, where the queue has long since drained.
+        """
+        try:
+            self._flush_map()
+        except Exception:
+            pass                          # never let a map failure block the window closing
+        super().destroy()
+
     def _open_map_in_browser(self):
+        # The map may still be queued; the click is exactly the moment to pay for it.
+        self._flush_map()
         if not self._map_path or not os.path.exists(self._map_path):
             messagebox.showinfo("No Map Yet", "Generate a flight plan first.")
             return
@@ -1677,70 +1713,89 @@ class FlightPlannerGUI(tk.Tk):
         }
         self._draw_preview()
 
-        # 9. Render dynamic map using Folium
-        survey_map = folium.Map(location=[center_lat, center_lon], zoom_start=12)
-
-        # Colours match the canvas preview so the two views read the same way. Each group
-        # is its own FeatureGroup, so LayerControl can switch it off -- the only sane way
-        # to cope with a dense survey putting 50+ markers on the map.
-        hull_latlon = xy_to_latlon(list(survey_poly.exterior.coords))
-        folium.PolyLine(hull_latlon, color='#1f6fd0', weight=3, opacity=0.7,
-                        tooltip='Target buffer envelope').add_to(survey_map)
-
-        pattern_latlon = xy_to_latlon(list(survey_pattern.coords))
-        folium.PolyLine(pattern_latlon, color='#d81b1b', weight=4, opacity=0.9,
-                        dash_array='5, 6', tooltip='Survey flight track').add_to(survey_map)
-
-        boundary_layer = folium.FeatureGroup(name='Boundary points')
-        for point in survey_boundary:
-            lat, lon, wp_name = point[0], point[1], point[2]
-            folium.Marker(
-                location=[lat, lon],
-                popup=f"{wp_name}: ({lat:.5f}, {lon:.5f})",
-                tooltip=wp_name,
-                icon=folium.Icon(color='purple', icon='info-sign')
-            ).add_to(boundary_layer)
-        boundary_layer.add_to(survey_map)
-
-        # Labels ride along permanently while there are few enough to read; past that they
-        # would be an unreadable mat, so they fall back to hover.
-        label_always = len(survey_waypoints) <= 24
-        waypoint_layer = folium.FeatureGroup(name='Survey waypoints')
-        for name, lat, lon in survey_waypoints:
-            folium.CircleMarker(
-                location=[lat, lon], radius=4, color='#d81b1b', weight=1,
-                fill=True, fill_color='#d81b1b', fill_opacity=0.9,
-                tooltip=folium.Tooltip(name, permanent=label_always, direction='right'),
-                popup=f"{name}<br>{lat:.6f}, {lon:.6f}",
-            ).add_to(waypoint_layer)
-        waypoint_layer.add_to(survey_map)
-
-        if mapped_before or mapped_after:
-            transit_layer = folium.FeatureGroup(name='Transit legs')
-            for chain, anchor, leads in ((mapped_before, pattern_latlon[0], True),
-                                         (mapped_after, pattern_latlon[-1], False)):
-                if not chain:
-                    continue
-                points = [(p["lat"], p["lon"]) for p in chain]
-                leg = points + [anchor] if leads else [anchor] + points
-                folium.PolyLine(leg, color='#8a8a8a', weight=3, opacity=0.9,
-                                dash_array='2, 8',
-                                tooltip='Transit to the box' if leads
-                                        else 'Transit from the box').add_to(transit_layer)
-                for p in chain:
-                    folium.CircleMarker(
-                        location=[p["lat"], p["lon"]], radius=5, color='#444444', weight=2,
-                        fill=True, fill_color='#8a8a8a', fill_opacity=0.9,
-                        tooltip=folium.Tooltip(p["name"], permanent=True, direction='right'),
-                        popup=f"{p['name']}<br>{p['lat']:.6f}, {p['lon']:.6f}",
-                    ).add_to(transit_layer)
-            transit_layer.add_to(survey_map)
-
-        folium.LayerControl(collapsed=False).add_to(survey_map)
-
-        # 10. Save the interactive map for the browser button (Leaflet needs a real browser)
+        # 9. The Folium map is the slowest thing in a run: folium alone is ~1.1 s of
+        # import because it drags in pandas, and the map is only ever read through the
+        # browser button. Import and build are both deferred to the idle queue so the
+        # window paints first. Anything needing the file on disk calls _flush_map().
         self._map_path = os.path.join(out_dir, f"{area_name}_flight_path.html")
-        survey_map.save(self._map_path)
+
+        def render_map():
+            import folium
+
+            survey_map = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+
+            # Colours match the canvas preview so the two views read the same way. Each group
+            # is its own FeatureGroup, so LayerControl can switch it off -- the only sane way
+            # to cope with a dense survey putting 50+ markers on the map.
+            hull_latlon = xy_to_latlon(list(survey_poly.exterior.coords))
+            folium.PolyLine(hull_latlon, color='#1f6fd0', weight=3, opacity=0.7,
+                            tooltip='Target buffer envelope').add_to(survey_map)
+
+            pattern_latlon = xy_to_latlon(list(survey_pattern.coords))
+            folium.PolyLine(pattern_latlon, color='#d81b1b', weight=4, opacity=0.9,
+                            dash_array='5, 6', tooltip='Survey flight track').add_to(survey_map)
+
+            boundary_layer = folium.FeatureGroup(name='Boundary points')
+            for point in survey_boundary:
+                lat, lon, wp_name = point[0], point[1], point[2]
+                folium.Marker(
+                    location=[lat, lon],
+                    popup=f"{wp_name}: ({lat:.5f}, {lon:.5f})",
+                    tooltip=wp_name,
+                    icon=folium.Icon(color='purple', icon='info-sign')
+                ).add_to(boundary_layer)
+            boundary_layer.add_to(survey_map)
+
+            # Labels ride along permanently while there are few enough to read; past that they
+            # would be an unreadable mat, so they fall back to hover.
+            label_always = len(survey_waypoints) <= 24
+            waypoint_layer = folium.FeatureGroup(name='Survey waypoints')
+            for name, lat, lon in survey_waypoints:
+                folium.CircleMarker(
+                    location=[lat, lon], radius=4, color='#d81b1b', weight=1,
+                    fill=True, fill_color='#d81b1b', fill_opacity=0.9,
+                    tooltip=folium.Tooltip(name, permanent=label_always, direction='right'),
+                    popup=f"{name}<br>{lat:.6f}, {lon:.6f}",
+                ).add_to(waypoint_layer)
+            waypoint_layer.add_to(survey_map)
+
+            if mapped_before or mapped_after:
+                transit_layer = folium.FeatureGroup(name='Transit legs')
+                for chain, anchor, leads in ((mapped_before, pattern_latlon[0], True),
+                                             (mapped_after, pattern_latlon[-1], False)):
+                    if not chain:
+                        continue
+                    points = [(p["lat"], p["lon"]) for p in chain]
+                    leg = points + [anchor] if leads else [anchor] + points
+                    folium.PolyLine(leg, color='#8a8a8a', weight=3, opacity=0.9,
+                                    dash_array='2, 8',
+                                    tooltip='Transit to the box' if leads
+                                            else 'Transit from the box').add_to(transit_layer)
+                    for p in chain:
+                        folium.CircleMarker(
+                            location=[p["lat"], p["lon"]], radius=5, color='#444444', weight=2,
+                            fill=True, fill_color='#8a8a8a', fill_opacity=0.9,
+                            tooltip=folium.Tooltip(p["name"], permanent=True, direction='right'),
+                            popup=f"{p['name']}<br>{p['lat']:.6f}, {p['lon']:.6f}",
+                        ).add_to(transit_layer)
+                transit_layer.add_to(survey_map)
+
+            folium.LayerControl(collapsed=False).add_to(survey_map)
+
+            # 10. Save the interactive map for the browser button (Leaflet needs a real browser)
+            survey_map.save(self._map_path)
+
+        # Drop the previous run's file before queuing this one. Everything else here is
+        # written synchronously, so a leftover HTML would sit next to fresh CSVs looking
+        # current while describing the last run -- silently wrong beats loudly absent, so
+        # a reader that gets in before the idle callback finds nothing rather than a lie.
+        if os.path.exists(self._map_path):
+            try:
+                os.remove(self._map_path)
+            except OSError:
+                pass                      # still open in a browser; render_map overwrites it
+        self._pending_map = render_map
+        self.after_idle(self._flush_map)
 
         self._run_count += 1
         short = clearance_m < margin * 1000.0 - 1.0
@@ -1878,6 +1933,8 @@ class FlightPlannerGUI(tk.Tk):
 
     def _open_export_folder(self):
         """Reveal the output directory so the files can be AirDropped or attached."""
+        # Finish the deferred map first, or the folder opens a file short of what it lists.
+        self._flush_map()
         folder = self._output_dir or os.getcwd()
         try:
             if sys.platform == 'win32':
