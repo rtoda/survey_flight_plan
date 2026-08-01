@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import math
+import re
 import subprocess
 import sys
 import time
@@ -22,6 +23,9 @@ import folium
 # Generated output lives under here, one directory per named plan, so it never litters
 # the project root. Git-ignored wholesale.
 PLANS_DIR = "plans"
+
+# Rows offered for transit waypoints, in each of the before/after groups.
+TRANSIT_ROWS = 6
 
 # --- SURVEY ENGINE CONFIGURATION & HELPERS ---
 
@@ -306,7 +310,21 @@ def build_survey_kml(area_name, envelope_latlon, track_latlon, waypoints, bounda
     return out.getvalue()
 
 
-def build_foreflight_route(waypoints, origin, destination, flight_level):
+def foreflight_waypoint_name(raw, fallback):
+    """Coerce a user-typed label into something ForeFlight will accept as a waypoint name.
+
+    Its rules: all capitals, at least 3 characters, at least one letter, no spaces. Anything
+    that cannot be salvaged falls back to the generated name rather than silently producing
+    a row ForeFlight would reject on import.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", (raw or "").strip()).upper().strip("_")
+    if len(cleaned) >= 3 and any(ch.isalpha() for ch in cleaned):
+        return cleaned
+    return fallback
+
+
+def build_foreflight_route(waypoints, origin, destination, flight_level,
+                           before=(), after=()):
     """ForeFlight route text and its foreflightmobile:// URL.
 
     Mirrors notebooks/SendToForeFlight.ipynb: `APT@<origin>` then one
@@ -315,10 +333,18 @@ def build_foreflight_route(waypoints, origin, destination, flight_level):
     the notebook does -- about 11 m, which is far finer than the route line needs and keeps
     the URL short enough to stay a scannable QR code.
     """
-    parts = []
-    for _name, lat, lon in waypoints:
-        parts.append(f"{abs(lat):.4f}{'N' if lat >= 0 else 'S'}/"
-                     f"{abs(lon):.4f}{'E' if lon >= 0 else 'W'}/F{flight_level}")
+    def coord_token(lat, lon):
+        return (f"{abs(lat):.4f}{'N' if lat >= 0 else 'S'}/"
+                f"{abs(lon):.4f}{'E' if lon >= 0 else 'W'}/F{flight_level}")
+
+    def transit_tokens(points):
+        # An identifier goes in as-is -- ForeFlight resolves it, and it costs ~6 characters
+        # against ~25 for a coordinate pair, which keeps the QR code sparser.
+        return [p["ident"] if p["ident"] else coord_token(p["lat"], p["lon"]) for p in points]
+
+    parts = (transit_tokens(before)
+             + [coord_token(lat, lon) for _name, lat, lon in waypoints]
+             + transit_tokens(after))
     route_text = f"APT@{origin}+" + "+".join(parts) + f"+{destination}"
     return route_text, f"foreflightmobile://maps/search?q={route_text}"
 
@@ -555,6 +581,44 @@ class FlightPlannerGUI(tk.Tk):
         clear_btn = ttk.Button(coords_tab, text="Clear All GPS Fields", command=self._clear_gps_fields)
         clear_btn.grid(row=12, column=1, columnspan=3, pady=5, sticky="ew")
 
+        # TAB 3: TRANSIT WAYPOINTS, BEFORE AND AFTER THE SURVEY BOX
+        transit_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(transit_tab, text="Waypoints")
+
+        ttk.Label(transit_tab, wraplength=430, justify=tk.LEFT, foreground="#555555",
+                  text="Legs flown before reaching the survey box and after leaving it. "
+                       "Fill EITHER an identifier (KBOI, BOI, DANDD) OR a lat/lon pair.").grid(
+            row=0, column=0, columnspan=5, sticky="w", pady=(0, 8))
+
+        self.transit_rows = {}
+        row_cursor = 1
+        for group, heading in (("before", "Before the survey box"),
+                               ("after", "After the survey box")):
+            ttk.Label(transit_tab, text=heading, font=("Helvetica", 10, "bold")).grid(
+                row=row_cursor, column=0, columnspan=5, sticky="w", pady=(8, 2))
+            row_cursor += 1
+            for col, title in enumerate(("#", "Identifier", "Latitude", "Longitude", "Label")):
+                ttk.Label(transit_tab, text=title, font=("Helvetica", 9, "bold")).grid(
+                    row=row_cursor, column=col, padx=2, pady=2)
+            row_cursor += 1
+
+            rows = []
+            for i in range(TRANSIT_ROWS):
+                ttk.Label(transit_tab, text=f"{i+1}").grid(row=row_cursor, column=0, padx=5, pady=2)
+                ident = ttk.Entry(transit_tab, width=10)
+                lat = ttk.Entry(transit_tab, width=11)
+                lon = ttk.Entry(transit_tab, width=11)
+                label = ttk.Entry(transit_tab, width=12)
+                for col, widget in enumerate((ident, lat, lon, label), start=1):
+                    widget.grid(row=row_cursor, column=col, padx=3, pady=2)
+                rows.append((ident, lat, lon, label))
+                row_cursor += 1
+            self.transit_rows[group] = rows
+
+        ttk.Button(transit_tab, text="Clear All Waypoints",
+                   command=self._clear_transit_fields).grid(
+            row=row_cursor, column=1, columnspan=4, pady=8, sticky="ew")
+
         # --- AREA SAVE / LOAD ---
         # On the common pane rather than inside a tab: these act on the whole area
         # definition (points AND parameters), not just the coordinate grid.
@@ -784,7 +848,10 @@ class FlightPlannerGUI(tk.Tk):
         track = self._preview['track']
         marks = self._preview['marks']
 
-        points = list(rect) + list(track) + [(x, y) for x, y, _ in marks]
+        transit_before = self._preview.get('transit_before', [])
+        transit_after = self._preview.get('transit_after', [])
+        points = (list(rect) + list(track) + [(x, y) for x, y, _ in marks]
+                  + [(x, y) for x, y, _ in transit_before + transit_after])
         min_x = min(p[0] for p in points)
         max_x = max(p[0] for p in points)
         min_y = min(p[1] for p in points)
@@ -807,6 +874,18 @@ class FlightPlannerGUI(tk.Tk):
         # Target buffer envelope
         rect_px = [coord for point in rect for coord in to_px(point)]
         canvas.create_polygon(rect_px, fill="#eaf1fb", outline="#1f6fd0", width=2)
+
+        # Transit legs, drawn under the survey track so the survey stays dominant
+        if track:
+            for chain, joins_at in ((transit_before, track[0]), (transit_after, track[-1])):
+                if not chain:
+                    continue
+                leg = [to_px((x, y)) for x, y, _ in chain]
+                leg = leg + [to_px(joins_at)] if chain is transit_before else [to_px(joins_at)] + leg
+                for start, end in zip(leg, leg[1:]):
+                    canvas.create_line(start[0], start[1], end[0], end[1], fill="#8a8a8a",
+                                       width=2, dash=(2, 5), arrow=tk.LAST,
+                                       arrowshape=(10, 12, 4))
 
         # Flight track, with a direction arrow on each leg long enough to show one
         track_px = [to_px(point) for point in track]
@@ -843,6 +922,18 @@ class FlightPlannerGUI(tk.Tk):
             if not any(self._label(lx, ly, name, anchor=la, fill="#a01010", bold=True, avoid=placed)
                        for lx, ly, la in spots):
                 hidden += 1
+
+        # Transit waypoints: grey, so they read as "getting there" not "surveying"
+        for x, y, name in transit_before + transit_after:
+            px, py = to_px((x, y))
+            canvas.create_rectangle(px - 4, py - 4, px + 4, py + 4,
+                                    fill="#666666", outline="white", width=1)
+            if show_wp:
+                spots = [(px, py - 14, "center"), (px, py + 14, "center"),
+                         (px + 10, py, "w"), (px - 10, py, "e")]
+                if not any(self._label(lx, ly, name, anchor=la, fill="#444444", avoid=placed)
+                           for lx, ly, la in spots):
+                    hidden += 1
 
         # Boundary waypoints supplied by the operator
         show_bnd = self.show_boundary_labels.get()
@@ -887,6 +978,8 @@ class FlightPlannerGUI(tk.Tk):
         legend = [("#1f6fd0", "Target buffer envelope"),
                   ("#d81b1b", "Flight track & exported waypoints (ring = first, square = last)"),
                   ("#7b2fbe", "Boundary waypoints")]
+        if transit_before or transit_after:
+            legend.append(("#8a8a8a", "Transit legs to and from the box"))
         for row, (color, text) in enumerate(legend):
             ly = legend_top + row * 16
             canvas.create_line(pad, ly, pad + 18, ly, fill=color, width=3)
@@ -905,6 +998,45 @@ class FlightPlannerGUI(tk.Tk):
             lat.delete(0, tk.END)
             lon.delete(0, tk.END)
             lbl.delete(0, tk.END)
+
+    def _clear_transit_fields(self):
+        for rows in self.transit_rows.values():
+            for widgets in rows:
+                for widget in widgets:
+                    widget.delete(0, tk.END)
+
+    def _get_transit_points(self, group, line_prefix):
+        """Transit waypoints for one group, in the order flown.
+
+        A row needs either an identifier or a complete lat/lon pair. Identifier-only rows
+        reach the route link but cannot be drawn or written to the waypoint CSVs, because
+        their position is unknown here -- ForeFlight resolves them, this app cannot.
+        """
+        tag = 'B' if group == 'before' else 'A'
+        points = []
+        for idx, (ident_e, lat_e, lon_e, label_e) in enumerate(self.transit_rows[group], start=1):
+            ident = ident_e.get().strip().upper()
+            lat_raw, lon_raw = lat_e.get().strip(), lon_e.get().strip()
+            if not (ident or lat_raw or lon_raw):
+                continue
+
+            lat = lon = None
+            if lat_raw or lon_raw:
+                try:
+                    lat, lon = float(lat_raw), float(lon_raw)
+                except ValueError:
+                    raise ValueError(f"{group.capitalize()} waypoint row {idx}: latitude and "
+                                     f"longitude must both be decimal numbers, or leave both "
+                                     f"blank and give an identifier.")
+
+            fallback = f"{line_prefix}{tag}{idx}"
+            points.append({
+                "ident": ident or None,
+                "lat": lat,
+                "lon": lon,
+                "name": foreflight_waypoint_name(label_e.get() or ident, fallback),
+            })
+        return points
 
     # --- FLIGHT PLAN SAVE / LOAD -----------------------------------------------------
 
@@ -926,6 +1058,13 @@ class FlightPlannerGUI(tk.Tk):
             "rectangular_box": self.rectangular_box.get(),
             "repeats": self.repeats.get(),
             "boundary": boundary,
+            "transit": {
+                group: [{"ident": i.get().strip(), "lat": la.get().strip(),
+                         "lon": lo.get().strip(), "label": lb.get().strip()}
+                        for i, la, lo, lb in rows
+                        if any(w.get().strip() for w in (i, la, lo, lb))]
+                for group, rows in self.transit_rows.items()
+            },
         }
 
     def _apply_plan_dict(self, data):
@@ -960,11 +1099,24 @@ class FlightPlannerGUI(tk.Tk):
             self.prefix_entry.delete(0, tk.END)
             self.prefix_entry.insert(0, str(data["waypoint_prefix"]))
 
+        transit = data.get("transit") or {}
+        for group, rows in self.transit_rows.items():
+            if len(transit.get(group, [])) > len(rows):
+                raise ValueError(f"File has {len(transit[group])} '{group}' waypoints; "
+                                 f"only {len(rows)} rows are available.")
+
         self._clear_gps_fields()
         for row, point in zip(self.coord_rows, boundary):
             row[0].insert(0, str(point.get("lat", "")))
             row[1].insert(0, str(point.get("lon", "")))
             row[2].insert(0, str(point.get("label", "")))
+
+        # Absent for plans saved before transit waypoints existed, which simply means none.
+        self._clear_transit_fields()
+        for group, rows in self.transit_rows.items():
+            for widgets, point in zip(rows, transit.get(group, [])):
+                for widget, key in zip(widgets, ("ident", "lat", "lon", "label")):
+                    widget.insert(0, str(point.get(key, "")))
 
     def _plan_dialog_dir(self):
         """Open the dialogs on this plan's own folder, falling back to plans/."""
@@ -1110,8 +1262,15 @@ class FlightPlannerGUI(tk.Tk):
             return
         self._output_dir = out_dir
 
-        ff_file, hw_file, waypoints = self._export_csv_files(
-            segments, xy_to_latlon, area_name, waypoint_prefix, out_dir)
+        try:
+            before = self._get_transit_points("before", waypoint_prefix)
+            after = self._get_transit_points("after", waypoint_prefix)
+        except ValueError as err:
+            messagebox.showerror("Input Error", str(err))
+            return
+
+        ff_file, hw_file, waypoints, survey_waypoints = self._export_csv_files(
+            segments, xy_to_latlon, area_name, waypoint_prefix, out_dir, before, after)
 
         # 7. Parse and Print Diagnostics Panel
         self.stats_text.delete("1.0", tk.END)
@@ -1134,10 +1293,11 @@ class FlightPlannerGUI(tk.Tk):
         # Route link for the QR view and for pasting into an email. Nothing here feeds the
         # survey geometry, so bad input degrades the link rather than the flight plan.
         route_text, route_url = build_foreflight_route(
-            waypoints,
+            survey_waypoints,
             self.inputs["origin_airport"].get().strip().upper() or "KBOI",
             self.inputs["destination_airport"].get().strip().upper() or "KBOI",
             self.inputs["survey_altitude"].get().strip() or "200",
+            before=before, after=after,
         )
         self._route = (route_text, route_url)
         route_file = os.path.join(out_dir, f"{area_name}_foreflight_route.txt")
@@ -1168,16 +1328,42 @@ class FlightPlannerGUI(tk.Tk):
             f"Ground Heading: {heading:.1f}° True",
             f"Requested Margin: {margin:.2f} km",
             margin_note,
-            f"Path Metrics: {dist_m/1000:.2f} km ({dist_nm:.2f} nm)",
-            f"Est. Flight Time: {time_min:.1f} min",
+            f"Survey Path: {dist_m/1000:.2f} km ({dist_nm:.2f} nm)",
+            f"Est. Survey Time: {time_min:.1f} min",
             f"Wrote Output: {os.path.basename(ff_file)}",
             f"Wrote Output: {os.path.basename(hw_file)}",
             f"ForeFlight layer: {os.path.basename(kml_file)}",
             f"ForeFlight layer: {os.path.basename(kmz_file)}",
             f"Share with pilot: {os.path.basename(pack_file)}",
             f"Route link: {os.path.basename(route_file)}",
-            "-" * 41
         ]
+
+        # Transit distance covers only the rows that carry coordinates: an identifier's
+        # position is unknown here, so including it would be a guess.
+        if before or after:
+            mapped_before = [p for p in before if p["lat"] is not None]
+            mapped_after = [p for p in after if p["lat"] is not None]
+            transit_m = 0.0
+            for chain, anchor in ((mapped_before, segments[0].coords[0]),
+                                  (mapped_after, segments[-1].coords[-1])):
+                if not chain:
+                    continue
+                legs = [to_m.transform(p["lon"], p["lat"]) for p in chain]
+                legs = legs + [anchor] if chain is mapped_before else [anchor] + legs
+                transit_m += sum(math.dist(a, b) for a, b in zip(legs, legs[1:]))
+            transit_nm = transit_m / 1852.0
+            unmapped = (len(before) - len(mapped_before)) + (len(after) - len(mapped_after))
+            stats_output.append(
+                f"Transit Legs: {len(before)} before / {len(after)} after")
+            stats_output.append(
+                f"Transit Path: {transit_m/1000:.2f} km ({transit_nm:.2f} nm)"
+                + (f"  [{unmapped} by identifier, not counted]" if unmapped else ""))
+            if gs > 0:
+                total_nm = dist_nm + transit_nm
+                stats_output.append(
+                    f"Total w/ Transit: {total_nm:.2f} nm, {(total_nm / gs) * 60.0:.1f} min")
+
+        stats_output.append("-" * 41)
         for idx, dm, dnm, tmin in segment_summaries:
             stats_output.append(f"Segment {idx:02d}: {dm/1000:.1f} km | {tmin:.1f} min")
 
@@ -1188,7 +1374,16 @@ class FlightPlannerGUI(tk.Tk):
             'rect': list(survey_poly.exterior.coords),
             'track': list(survey_pattern.coords),
             'marks': [(*to_m.transform(lon, lat), label) for lat, lon, label in survey_boundary],
-            'waypoints': [(*to_m.transform(lon, lat), name) for name, lat, lon in waypoints],
+            # Survey line ends only; transit points get their own grey markers below so the
+            # two are never confused in the air.
+            'waypoints': [(*to_m.transform(lon, lat), name) for name, lat, lon in survey_waypoints],
+            # Transit legs run from the last mapped "before" point into the first survey
+            # waypoint, and out of the last one into the "after" points. Identifier-only
+            # rows are absent, so a leg may simply be missing rather than wrong.
+            'transit_before': [(*to_m.transform(p["lon"], p["lat"]), p["name"])
+                               for p in before if p["lat"] is not None],
+            'transit_after': [(*to_m.transform(p["lon"], p["lat"]), p["name"])
+                              for p in after if p["lat"] is not None],
             'meta': {
                 'area_name': area_name,
                 'lines': len(segments),
@@ -1235,7 +1430,8 @@ class FlightPlannerGUI(tk.Tk):
             f"Send {os.path.basename(pack_file)} to the pilot."
         )
 
-    def _export_csv_files(self, flown_segments, conversion_func, area_name, line_prefix, out_dir):
+    def _export_csv_files(self, flown_segments, conversion_func, area_name, line_prefix, out_dir,
+                          before=(), after=()):
         """Write both flight-plan CSVs in the exact formats the pilot supplied samples for.
 
         Waypoints are named per survey line as <prefix>L<n>S / <prefix>L<n>F -- Start and
@@ -1246,12 +1442,20 @@ class FlightPlannerGUI(tk.Tk):
         """
         # Single source of truth for waypoint names: whatever gets written here is what
         # the preview labels and the KML use, so they cannot disagree with these files.
-        waypoints = []
+        survey = []
         for idx, segment in enumerate(flown_segments, start=1):
             ends = conversion_func([segment.coords[0], segment.coords[-1]])
             (start_lat, start_lon), (end_lat, end_lon) = ends
-            waypoints.append((f"{line_prefix}L{idx}S", start_lat, start_lon))
-            waypoints.append((f"{line_prefix}L{idx}F", end_lat, end_lon))
+            survey.append((f"{line_prefix}L{idx}S", start_lat, start_lon))
+            survey.append((f"{line_prefix}L{idx}F", end_lat, end_lon))
+
+        # Transit waypoints bracket the survey in flight order. Identifier-only rows are
+        # skipped: these files need coordinates, and ForeFlight/the FMS already know where
+        # a published identifier is.
+        def mapped(points):
+            return [(p["name"], p["lat"], p["lon"]) for p in points if p["lat"] is not None]
+
+        waypoints = mapped(before) + survey + mapped(after)
 
         # Pilot's sample carries 7-8 decimals; 4 was ~11 m of avoidable rounding.
         ff_file = os.path.join(out_dir, f"{area_name}_waypoints_foreflight.csv")
@@ -1270,7 +1474,9 @@ class FlightPlannerGUI(tk.Tk):
                 lon_fmt = dd_to_honeywell_format(lon, 'E', 'W', degree_digits=3)
                 writer.writerow(['X', name, 'NA', lat_fmt, lon_fmt])
 
-        return ff_file, hw_file, waypoints
+        # `waypoints` is everything written (transit included) for the KML and the preview;
+        # `survey` is the line ends alone, which is what the route link brackets.
+        return ff_file, hw_file, waypoints, survey
 
     def _export_foreflight_bundle(self, area_name, waypoint_prefix, kml_text, waypoints,
                                   generated_utc, manifest_stamp, out_dir):

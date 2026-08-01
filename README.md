@@ -87,6 +87,22 @@ but lines of very uneven length.
 **Repeats** (1–4) flies the whole box that many times, with identical line directions each
 cycle. Line numbering continues across cycles, so waypoint names stay unique.
 
+The **Waypoints** tab adds transit legs flown before reaching the box and after leaving it,
+on top of the origin and destination airports. Each row takes **either** an identifier
+(`BOI`, `DANDD`) **or** a lat/lon pair:
+
+- An **identifier** goes into the route link as-is for ForeFlight to resolve. It costs about
+  6 characters against 25 for a coordinate pair, which keeps the QR sparser — but its
+  position is unknown here, so it cannot be drawn, written to the CSVs, or counted in the
+  transit distance.
+- A **lat/lon** row is written to both CSVs bracketing the survey waypoints, drawn on the
+  preview as a grey dashed leg, and included in the transit distance.
+
+Typed labels are coerced to what ForeFlight accepts — all capitals, at least 3 characters,
+at least one letter, no spaces — so `entry gate` becomes `ENTRY_GATE`. Anything that cannot
+be salvaged falls back to a generated name like `1B2`. The summary reports survey and
+transit distance separately.
+
 The perimeter margin is applied to the target before the box is taken, so the requested
 padding clears the boundary on all sides at any heading. The summary panel reports the
 padding actually achieved — trust that figure over the requested one, since a non-zero
