@@ -5,17 +5,17 @@ exports waypoints for ForeFlight and a Honeywell FMS.
 
 ![The planner: parameters and boundary points on the left, scaled flight-path preview on the right](docs/screenshot.png)
 
-Above: a 4 km swath at heading 045 — five equal-length survey lines across a box rotated onto
-the diagonal, each end labelled with the name written to the CSVs. The grey dashed leg runs
-in from a transit waypoint to `L01I`, an 8 km lead-in on the line's own bearing so the
-aircraft is established on track before the first line begins.
+Above: a 4 km swath at heading 000 — six equal-length north-south lines, each end named for
+the compass end it sits at, so `SL03` is the south end of line 3. The grey dashed leg runs in
+from a transit waypoint to `IL01`, an 8 km lead-in on the line's own bearing, so the aircraft
+is established on track before the first line begins.
 
 ## Features
 - Interactive Tkinter GUI to define survey boundary points and flight parameters
 - Generates an optimized rectangular survey pattern based on swath width, overlap, heading, and margins
 - Exports two CSV formats: ForeFlight-friendly and Honeywell-friendly
 - Draws a scaled flight-path preview directly in the window (native Tk canvas — no browser engine needed)
-- Saves an interactive Folium HTML map, opened on demand via **Open Interactive Map in Browser**
+- Saves an interactive Folium HTML map, opened on demand via **Open Map in Browser**
 - Exports a KML/KMZ map layer and a ForeFlight content pack for getting the pattern onto an iPad
 - Saves and reloads a whole plan — boundary points and every parameter — as JSON
 - Renders a scannable QR of the ForeFlight route link right in the window (no Pillow needed)
@@ -85,17 +85,18 @@ Unchecked, the passes are clipped to the padded target outline instead: less gro
 but lines of very uneven length.
 
 **Repeats** (1–4) flies the whole box that many times, with identical line directions each
-cycle. Line numbering continues across cycles, so waypoint names stay unique.
+cycle. The names repeat each cycle, because a name is a place rather than a step in the
+sequence.
 
 **Lead-in Distance** puts a waypoint that far back from the first line's start, along that
 line's own bearing, so the aircraft rolls out wings-level and is established on track before
-the line — and the sensor run — begins. It is named `L01I` (intercept), so the sequence reads
-`L01I`, `L01S`, `L01F`. Set 0 to disable.
+the line — and the sensor run — begins. It is named `IL01` (intercept, line 1), so the
+sequence reads `IL01`, `SL01`, `NL01`. Set 0 to disable.
 
 **Retrace line** flies each row out and back before moving to the next, rather than once
-through. The return run is numbered as its own line, so three rows become `1L1S`…`1L6F`.
-Distance on the lines doubles; the turns between rows do not, so the total grows by less
-than 2x.
+through. The return keeps its line's number and revisits its names, so three rows read
+`SL01, NL01, SL01, SL02, NL02, SL02, SL03, NL03, SL03`. Distance on the lines doubles; the
+turns between rows do not, so the total grows by less than 2x.
 
 The **Waypoints** tab adds transit legs flown before reaching the box and after leaving it,
 on top of the origin and destination airports. Each row takes **either** an identifier
@@ -120,7 +121,7 @@ the polygon's vertices, which changes the shape of the survey area.
 
 Typed labels are coerced to what ForeFlight accepts — all capitals, at least 3 characters,
 at least one letter, no spaces — so `entry gate` becomes `ENTRY_GATE`. Anything that cannot
-be salvaged falls back to a generated name like `1B2`. The summary reports survey and
+be salvaged falls back to a generated name like `B02`. The summary reports survey and
 transit distance separately.
 
 The perimeter margin is applied to the target before the box is taken, so the requested
@@ -164,9 +165,14 @@ See [foreflight.md](foreflight.md) for the import rules these files are built ag
 including which claims are verified against ForeFlight's docs and which are not.
 
 ## Notes & Tips
-- Waypoints are named `L01S` / `L01F` — Start and Finish of line 01 — widening to `L001S`
-  past 99 lines. **Five characters is the ceiling** a navigation database allows (Jeppesen
-  NavData, following ARINC 424), so the number is padded no further than it needs to be.
+- Waypoints are named `SL01` / `NL01` — the **south and north ends of line 1**. The letters
+  are N/S for lines running predominantly north-south and E/W for east-west, following the
+  line's own bearing. The lead-in is `IL01`.
+- A name is a *place*, not a step in the sequence, so a retrace revisits the same names and
+  the list reads in flight order: `SL01, NL01, SL01, SL02, NL02, SL02`. The turnaround is
+  listed once. Names are therefore not unique across a plan with repeats or retrace.
+- **Five characters is the ceiling** a navigation database allows (Jeppesen NavData,
+  following ARINC 424), so line numbers pad to two digits and widen only when needed.
 - **Line ID Prefix** is optional and empty by default. One or two letters or digits go in
   front of every name, for telling two areas apart in the same database — but they spend
   characters from that same budget, so a prefix only fits while the line count is under 100.
@@ -174,7 +180,7 @@ including which claims are verified against ForeFlight's docs and which are not.
 - Provide at least 3 boundary points to define the survey polygon.
 - The GUI runs one calculation at startup, so the preview and CSVs already exist before you
   click anything. The status line under the button stamps each run so repeat clicks are visible.
-- Tile-backed maps need real JavaScript; use **Open Interactive Map in Browser** for that view.
+- Tile-backed maps need real JavaScript; use **Open Map in Browser** for that view.
 - `notebooks/SendToForeFlight.ipynb` does the same route link and QR as the **Show QR**
   button, but standalone against an exported CSV. It calls `make_image()`, so unlike the
   GUI it does need Pillow.

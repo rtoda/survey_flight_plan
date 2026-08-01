@@ -177,7 +177,13 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
         raise ValueError('No pass segments could be generated. Adjust coordinates or swath width.')
 
     def assemble(flip_rows, flip_direction):
-        """One candidate pattern: which row to begin at, and which end of it."""
+        """One candidate pattern: which row to begin at, and which end of it.
+
+        Returns (segment, line_number) pairs. The line number is the row's position in
+        flight order, and a retrace keeps its row's number rather than taking a new one --
+        the pilot's scheme names the physical ends of a line, so flying it out and back
+        revisits the same two names.
+        """
         segments = []
         rows = list(reversed(pass_rows)) if flip_rows else pass_rows
         for row_idx, row_segments in enumerate(rows):
@@ -194,11 +200,10 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
                 oriented = sorted(segment.coords, key=lambda c: c[0])
                 if reverse:
                     oriented = oriented[::-1]
-                segments.append(LineString(oriented))
+                segments.append((LineString(oriented), row_idx + 1))
                 if retrace:
-                    # The return run is its own numbered line: same ground track, opposite
-                    # direction, so its Start sits on the forward pass's Finish.
-                    segments.append(LineString(oriented[::-1]))
+                    # Same ground, opposite direction, SAME line number.
+                    segments.append((LineString(oriented[::-1]), row_idx + 1))
         return segments
 
     def unrotated(point):
@@ -215,17 +220,19 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
             candidate = assemble(flip_rows, flip_direction)
             cost = 0.0
             if entry_xy is not None:
-                cost += math.dist(entry_xy, unrotated(candidate[0].coords[0]))
+                cost += math.dist(entry_xy, unrotated(candidate[0][0].coords[0]))
             if exit_xy is not None:
-                cost += math.dist(unrotated(candidate[-1].coords[-1]), exit_xy)
+                cost += math.dist(unrotated(candidate[-1][0].coords[-1]), exit_xy)
             if best is None or cost < best[0]:
                 best = (cost, candidate)
     cycle_segments = best[1]
 
     # Repeats fly the whole box again from the top, so the line directions and sensor
-    # geometry of every cycle are identical. Line numbering runs straight on through, which
-    # keeps every waypoint name unique and in flight order.
-    pass_segments = cycle_segments * max(1, int(repeats))
+    # geometry of every cycle are identical. Line numbers restart each cycle, because a
+    # name identifies a physical end of a line -- flying it again revisits that name.
+    pass_pairs = cycle_segments * max(1, int(repeats))
+    pass_segments = [seg for seg, _line in pass_pairs]
+    line_numbers = [line for _seg, line in pass_pairs]
 
     pattern_points = []
     for segment in pass_segments:
@@ -248,7 +255,7 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
     # Report the region actually flown, so the preview, KML and clearance check all agree.
     flown_region = affinity.rotate(clip_region, heading_angle_deg, origin=pivot,
                                    use_radians=False) if rectangular else coverage
-    return flown_region, rotated_pattern, flown_segments
+    return flown_region, rotated_pattern, flown_segments, line_numbers
 
 # --- FOREFLIGHT KML / CONTENT PACK EXPORT ---
 #
@@ -347,6 +354,21 @@ def build_survey_kml(area_name, envelope_latlon, track_latlon, waypoints, bounda
 
     w('  </Document>\n</kml>\n')
     return out.getvalue()
+
+
+def line_end_labels(segment):
+    """Which compass end of its line each end of this segment sits at.
+
+    Returns (start_letter, finish_letter). The pair is N/S for lines running predominantly
+    north-south and E/W for lines running predominantly east-west, decided by which axis
+    the line is closer to. Flying north means starting at the South end, hence ('S', 'N').
+    """
+    (x0, y0), (x1, y1) = segment.coords[0], segment.coords[-1]
+    dx, dy = x1 - x0, y1 - y0
+    bearing = math.degrees(math.atan2(dx, dy)) % 180.0
+    if bearing < 45.0 or bearing >= 135.0:
+        return ('S', 'N') if dy > 0 else ('N', 'S')
+    return ('W', 'E') if dx > 0 else ('E', 'W')
 
 
 def lead_in_point(first_segment, lead_km):
@@ -1494,7 +1516,7 @@ class FlightPlannerGUI(tk.Tk):
             if mapped_after else None
 
         try:
-            survey_poly, survey_pattern, segments = build_rectangular_pattern(
+            survey_poly, survey_pattern, segments, line_numbers = build_rectangular_pattern(
                 survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m, center_lat,
                 rectangular=self.rectangular_box.get(), repeats=repeats,
                 retrace=self.retrace_lines.get(), entry_xy=entry_xy, exit_xy=exit_xy
@@ -1523,7 +1545,7 @@ class FlightPlannerGUI(tk.Tk):
         try:
             ff_file, hw_file, waypoints, survey_waypoints = self._export_csv_files(
                 segments, xy_to_latlon, area_name, waypoint_prefix, out_dir, before, after,
-                lead_xy)
+                lead_xy, line_numbers)
         except ValueError as err:
             messagebox.showerror("Waypoint Naming Error", str(err))
             return
@@ -1582,9 +1604,10 @@ class FlightPlannerGUI(tk.Tk):
             f"Repeats: {repeats}x  ({len(segments) // repeats} lines per cycle)",
             # With retrace on, half the "lines" are return runs over ground already flown,
             # so spell out how many distinct tracks that actually is.
-            f"Retrace: on — {len(segments) // (repeats * 2)} rows flown out and back"
+            f"Retrace: on — {max(line_numbers)} lines flown out and back"
             if self.retrace_lines.get() else "Retrace: off",
-            f"Generated Survey Lines: {len(segments)}",
+            # Distinct lines, then how many passes are flown over them.
+            f"Survey Lines: {max(line_numbers)}   ({len(segments)} passes)",
             f"Lead-in: {lead_in_km:.2f} km on the line bearing" if lead_xy is not None
             else "Lead-in: off",
             f"Ground Heading: {heading:.1f}° True",
@@ -1730,7 +1753,7 @@ class FlightPlannerGUI(tk.Tk):
         )
 
     def _export_csv_files(self, flown_segments, conversion_func, area_name, line_prefix, out_dir,
-                          before=(), after=(), lead_xy=None):
+                          before=(), after=(), lead_xy=None, line_numbers=None):
         """Write both flight-plan CSVs in the exact formats the pilot supplied samples for.
 
         Waypoints are named per survey line as <prefix>L<n>S / <prefix>L<n>F -- Start and
@@ -1741,22 +1764,32 @@ class FlightPlannerGUI(tk.Tk):
         """
         # Single source of truth for waypoint names: whatever gets written here is what
         # the preview labels and the KML use, so they cannot disagree with these files.
-        # Zero-pad to the width the line count actually needs, minimum two digits. This
-        # keeps names sorting correctly and, with no prefix, holds L999F to five characters
-        # -- the ARINC 424 ceiling for a navigation database identifier.
-        digits = max(2, len(str(len(flown_segments))))
+        # Names are <compass end><L><line number>: SL01 is the south end of line 1. Zero-pad
+        # to the width the line count needs, minimum two digits, so names sort correctly and
+        # still fit the five-character ARINC 424 ceiling.
+        line_numbers = list(line_numbers or range(1, len(flown_segments) + 1))
+        digits = max(2, len(str(max(line_numbers, default=1))))
 
         survey = []
         if lead_xy is not None:
-            # Named for the line it leads into: L01I, then L01S, then L01F. I for
-            # intercept, so the sequence reads intercept, start, finish.
+            # I for intercept, keeping the <letter>L<nn> shape: IL01 then SL01, NL01.
             (lead_lat, lead_lon), = conversion_func([lead_xy])
-            survey.append((f"{line_prefix}L{1:0{digits}d}I", lead_lat, lead_lon))
-        for idx, segment in enumerate(flown_segments, start=1):
+            survey.append((f"{line_prefix}IL{line_numbers[0]:0{digits}d}", lead_lat, lead_lon))
+        for segment, line in zip(flown_segments, line_numbers):
             ends = conversion_func([segment.coords[0], segment.coords[-1]])
             (start_lat, start_lon), (end_lat, end_lon) = ends
-            survey.append((f"{line_prefix}L{idx:0{digits}d}S", start_lat, start_lon))
-            survey.append((f"{line_prefix}L{idx:0{digits}d}F", end_lat, end_lon))
+            start_end, finish_end = line_end_labels(segment)
+            survey.append((f"{line_prefix}{start_end}L{line:0{digits}d}", start_lat, start_lon))
+            survey.append((f"{line_prefix}{finish_end}L{line:0{digits}d}", end_lat, end_lon))
+
+        # A retrace finishes where the next pass begins, so the turnaround would otherwise
+        # be listed twice. Collapsing consecutive repeats gives the pilot's sequence
+        # exactly: SL01, NL01, SL01 -- three waypoints for an out-and-back, not four.
+        collapsed = []
+        for entry in survey:
+            if not collapsed or collapsed[-1][0] != entry[0]:
+                collapsed.append(entry)
+        survey = collapsed
 
         too_long = [name for name, _lat, _lon in survey if len(name) > MAX_WAYPOINT_NAME]
         if too_long:
