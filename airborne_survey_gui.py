@@ -570,6 +570,14 @@ class FlightPlannerGUI(tk.Tk):
         ttk.Label(coords_tab, text="Latitude", font=("Helvetica", 9, "bold")).grid(row=0, column=1, padx=2, pady=2)
         ttk.Label(coords_tab, text="Longitude", font=("Helvetica", 9, "bold")).grid(row=0, column=2, padx=2, pady=2)
         ttk.Label(coords_tab, text="Waypoint Label", font=("Helvetica", 9, "bold")).grid(row=0, column=3, padx=2, pady=2)
+        move_header = ttk.Label(coords_tab, text="Move", font=("Helvetica", 9, "bold"))
+        move_header.grid(row=0, column=4, columnspan=2, padx=2, pady=2)
+        ToolTip(move_header,
+                "Swap a row with the one above or below, so a new point can be slotted "
+                "between two filled rows.\n\n"
+                "These rows are the polygon's vertices in order, so reordering them "
+                "changes the shape of the survey area, not just the list. Press Generate "
+                "to see the result.")
 
         self.coord_rows = []
         for i in range(10):
@@ -583,6 +591,7 @@ class FlightPlannerGUI(tk.Tk):
             lbl_entry.grid(row=i+1, column=3, padx=3, pady=2)
             
             self.coord_rows.append((lat_entry, lon_entry, lbl_entry))
+            self._add_row_movers(coords_tab, self.coord_rows, i, i + 1, 4)
 
         # Clear Coordinates Button
         clear_btn = ttk.Button(coords_tab, text="Clear All GPS Fields", command=self._clear_gps_fields)
@@ -592,10 +601,11 @@ class FlightPlannerGUI(tk.Tk):
         transit_tab = ttk.Frame(notebook, padding=10)
         notebook.add(transit_tab, text="Waypoints")
 
-        ttk.Label(transit_tab, wraplength=430, justify=tk.LEFT, foreground="#555555",
+        ttk.Label(transit_tab, wraplength=520, justify=tk.LEFT, foreground="#555555",
                   text="Legs flown before reaching the survey box and after leaving it. "
-                       "Fill EITHER an identifier (KBOI, BOI, DANDD) OR a lat/lon pair.").grid(
-            row=0, column=0, columnspan=5, sticky="w", pady=(0, 8))
+                       "Fill EITHER an identifier (KBOI, BOI, DANDD) OR a lat/lon pair. "
+                       "Use Move to reorder — rows are flown top to bottom.").grid(
+            row=0, column=0, columnspan=7, sticky="w", pady=(0, 8))
 
         self.transit_rows = {}
         row_cursor = 1
@@ -607,6 +617,14 @@ class FlightPlannerGUI(tk.Tk):
             for col, title in enumerate(("#", "Identifier", "Latitude", "Longitude", "Label")):
                 ttk.Label(transit_tab, text=title, font=("Helvetica", 9, "bold")).grid(
                     row=row_cursor, column=col, padx=2, pady=2)
+            transit_move_header = ttk.Label(transit_tab, text="Move",
+                                            font=("Helvetica", 9, "bold"))
+            transit_move_header.grid(row=row_cursor, column=5, columnspan=2, padx=2, pady=2)
+            ToolTip(transit_move_header,
+                    "Swap a row with the one above or below, so a new waypoint can be "
+                    "slotted between two filled rows.\n\n"
+                    "Rows are flown top to bottom, so this sets the order of the transit "
+                    "legs. Press Generate to rebuild the route.")
             row_cursor += 1
 
             rows = []
@@ -619,6 +637,7 @@ class FlightPlannerGUI(tk.Tk):
                 for col, widget in enumerate((ident, lat, lon, label), start=1):
                     widget.grid(row=row_cursor, column=col, padx=3, pady=2)
                 rows.append((ident, lat, lon, label))
+                self._add_row_movers(transit_tab, rows, i, row_cursor, 5)
                 row_cursor += 1
             self.transit_rows[group] = rows
 
@@ -1097,6 +1116,30 @@ class FlightPlannerGUI(tk.Tk):
             lat.delete(0, tk.END)
             lon.delete(0, tk.END)
             lbl.delete(0, tk.END)
+
+    def _move_row(self, rows, index, delta):
+        """Swap one grid row's contents with its neighbour.
+
+        Swapping the text rather than re-gridding the widgets keeps the layout untouched,
+        and every consumer reads these grids top to bottom anyway, so order is all that
+        matters. Does not recalculate -- it is an edit like typing, so press Generate.
+        """
+        target = index + delta
+        if not 0 <= target < len(rows):
+            return
+        for here, there in zip(rows[index], rows[target]):
+            mine, theirs = here.get(), there.get()
+            here.delete(0, tk.END)
+            here.insert(0, theirs)
+            there.delete(0, tk.END)
+            there.insert(0, mine)
+
+    def _add_row_movers(self, parent, rows, index, grid_row, first_col):
+        """Up/down buttons for one row of a coordinate grid."""
+        for offset, (glyph, delta) in enumerate((("▲", -1), ("▼", 1))):
+            ttk.Button(parent, text=glyph, width=2,
+                       command=lambda i=index, d=delta: self._move_row(rows, i, d)).grid(
+                row=grid_row, column=first_col + offset, padx=(4 if offset == 0 else 1, 1))
 
     def _clear_transit_fields(self):
         for rows in self.transit_rows.values():

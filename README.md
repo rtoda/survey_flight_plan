@@ -98,6 +98,11 @@ on top of the origin and destination airports. Each row takes **either** an iden
 - A **lat/lon** row is written to both CSVs bracketing the survey waypoints, drawn on the
   preview as a grey dashed leg, and included in the transit distance.
 
+Both coordinate grids have **Move** buttons on each row, so a new point can be slotted
+between two filled rows rather than only appended. Rows are read top to bottom. On the
+Waypoints tab that sets the order the legs are flown; on the Boundary GPS tab it reorders
+the polygon's vertices, which changes the shape of the survey area.
+
 Typed labels are coerced to what ForeFlight accepts — all capitals, at least 3 characters,
 at least one letter, no spaces — so `entry gate` becomes `ENTRY_GATE`. Anything that cannot
 be salvaged falls back to a generated name like `1B2`. The summary reports survey and
