@@ -452,28 +452,53 @@ def foreflight_waypoint_name(raw, fallback):
 
 
 def build_foreflight_route(waypoints, origin, destination, flight_level,
-                           before=(), after=()):
+                           before=(), after=(), cruise_kt=None):
     """ForeFlight route text and its foreflightmobile:// URL.
 
-    Mirrors notebooks/SendToForeFlight.ipynb: `APT@<origin>` then one
-    `<lat>N/<lon>W/F<level>` token per waypoint, then the destination. The flight level is
-    hundreds of feet, so 200 means FL200 / 20,000 ft. Coordinates go out at 4 decimals as
-    the notebook does -- about 11 m, which is far finer than the route line needs and keeps
-    the URL short enough to stay a scannable QR code.
+    `APT@<origin>` then one `<lat>N/<lon>W` token per waypoint, the destination, and finally
+    the trailing performance tokens ForeFlight documents as
+    `ORIGIN+...+DESTINATION+SPEED+FUEL_BURN+ALTITUDE`.
+
+    The altitude and speed are stated **once, at the end**, not on every waypoint. The
+    per-waypoint `/F<level>` form exists to mark a *change* partway along a route; a survey
+    flies one level throughout, so repeating it cost 5 characters on every point -- 400 on an
+    80-waypoint plan -- and bought nothing. Trailing cruise altitude is documented as plain
+    feet, so FL200 goes out as 20000; the F-prefixed form is only for mid-route changes.
+
+    Without a speed token ForeFlight loads the route but complains "Cruise TAS required for
+    performance calculations", so the groundspeed is sent as the cruise speed. That is an
+    approximation -- ForeFlight reads it as true airspeed and applies its own winds on top --
+    but it is the only speed this app knows, and it is what the time estimates already use.
+
+    Coordinates go out at 4 decimals, about 11 m: far finer than a survey line needs, and it
+    keeps the URL short enough to stay a scannable QR code.
     """
     def coord_token(lat, lon):
         return (f"{abs(lat):.4f}{'N' if lat >= 0 else 'S'}/"
-                f"{abs(lon):.4f}{'E' if lon >= 0 else 'W'}/F{flight_level}")
+                f"{abs(lon):.4f}{'E' if lon >= 0 else 'W'}")
 
     def transit_tokens(points):
         # An identifier goes in as-is -- ForeFlight resolves it, and it costs ~6 characters
-        # against ~25 for a coordinate pair, which keeps the QR code sparser.
+        # against ~19 for a coordinate pair, which keeps the QR code sparser.
         return [p["ident"] if p["ident"] else coord_token(p["lat"], p["lon"]) for p in points]
 
     parts = (transit_tokens(before)
              + [coord_token(lat, lon) for _name, lat, lon in waypoints]
              + transit_tokens(after))
     route_text = f"APT@{origin}+" + "+".join(parts) + f"+{destination}"
+
+    # Both are best-effort: a junk entry drops its token rather than emitting something
+    # ForeFlight would choke on. The route itself is still perfectly usable without them.
+    try:
+        if cruise_kt is not None and float(cruise_kt) > 0:
+            route_text += f"+{int(float(cruise_kt))}kts"
+    except (TypeError, ValueError):
+        pass
+    try:
+        route_text += f"+{int(float(flight_level)) * 100}"
+    except (TypeError, ValueError):
+        pass
+
     return route_text, f"foreflightmobile://maps/search?q={route_text}"
 
 
@@ -1799,6 +1824,7 @@ class FlightPlannerGUI(tk.Tk):
             self.inputs["destination_airport"].get().strip().upper() or "KBOI",
             self.inputs["survey_altitude"].get().strip() or "200",
             before=before, after=after,
+            cruise_kt=self.inputs["groundspeed_kt"].get().strip(),
         )
         self._route = (route_text, route_url)
         route_file = os.path.join(out_dir, f"{area_name}_foreflight_route.txt")

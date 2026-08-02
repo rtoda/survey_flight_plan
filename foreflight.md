@@ -302,6 +302,48 @@ coordinates are emitted `lon,lat`, and that every waypoint name is all-caps / no
    waypoints with no turn fix between them over a long transit. His samples do it, so
    presumably not.
 
+## The route URL scheme
+
+`[DOC]` Fetched directly from `foreflight.com/support/app-urls/` (the `support.foreflight.com`
+mirror 403s to automated fetching). Documented shape:
+
+```
+foreflightmobile://maps/search?q=ORIGIN+WAYPOINT1+WAYPOINT2+DESTINATION+SPEED+FUEL_BURN+ALTITUDE+AIRCRAFT
+```
+
+Verbatim examples from that page:
+
+```
+foreflightmobile://maps/search?q=KISM+OCF+NITTS+KSRQ+125mph+12gph+8000
+foreflightmobile://maps/search?q=KOSH+GEP+KFCM+130kts+410kgph+4000ft
+foreflightmobile://maps/search?q=KAUS+ELA+KSGR+165kts+20.5gph+14000ft+N12345
+foreflightmobile://maps/search?q=KISM+OCF/F060+NITTS/N0100F040+KSRQ+8000
+```
+
+Points that matter for this app:
+
+- **The trailing performance tokens are positional**, after the destination: speed, then fuel
+  burn, then cruise altitude. All optional. We emit speed and altitude, not fuel burn.
+- **Speed is `130kts` or `125mph`.** `[PILOT]` Without one, ForeFlight loads the route but
+  warns *"Cruise TAS required for performance calculations"* — observed on a real iPad. We
+  send the Groundspeed field, which ForeFlight reads as **true airspeed** and then applies
+  its own winds to. An approximation, but it is the only speed this app has.
+- **Trailing cruise altitude is plain feet** (`8000`, or `14000ft`). FL280 goes out as
+  `28000`. The `F###` hundreds-of-feet form is documented for *mid-route changes at a
+  waypoint* (`OCF/F060`), not for the trailing token.
+- **The per-waypoint `/F###` suffix marks a level CHANGE partway along.** A survey holds one
+  level throughout, so repeating it on every waypoint was 5 wasted characters per point —
+  400 on an 80-waypoint plan — and bought nothing. Stating it once at the end is both
+  shorter and closer to what the syntax means.
+- `USER@NAME` addresses a waypoint already in ForeFlight's user database, and `APT@` an
+  airport. `USER@SL01` is 9 characters against 19 for a coordinate pair, so a plan whose
+  content pack is already loaded could shrink its QR a lot — at the cost of the link no
+  longer being self-contained. Not implemented.
+- `[UNKNOWN]` No stated limit on route length, waypoint count, or URL characters.
+  `[UNCONF]` A 40-waypoint limit is reported for **Cockpit Sharing** specifically; whether it
+  binds the URL scheme is unverified, and the support article 403s. `[PILOT]` 124 waypoints
+  loaded fine from a QR on a real iPad, so if a limit exists it is above that.
+
 ## KML gotchas worth remembering
 
 - **Coordinates are `lon,lat`** — longitude first, the opposite of this app's internal

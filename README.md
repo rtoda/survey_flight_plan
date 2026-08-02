@@ -197,6 +197,13 @@ no file transfer at all. The endpoints and cruise level come from the **Origin A
 **Destination Airport** and **Survey Flight Level** fields (200 means FL200, 20,000 ft).
 Drawn directly on the canvas, so Pillow is not required.
 
+The cruise altitude and speed are stated **once at the end** of the route, in ForeFlight's
+documented `DESTINATION+SPEED+ALTITUDE` form, rather than on every waypoint — the
+per-waypoint `/F###` suffix exists to mark a level *change* partway along, which a survey
+never has. That saves 5 characters per waypoint, 387 on an 80-waypoint plan, which is
+directly fewer QR modules to scan. The speed comes from the **Groundspeed** field; without it
+ForeFlight loads the route but warns `Cruise TAS required for performance calculations`.
+
 See [foreflight.md](foreflight.md) for the import rules these files are built against,
 including which claims are verified against ForeFlight's docs and which are not.
 
