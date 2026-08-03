@@ -441,11 +441,16 @@ def lead_in_point(first_segment, lead_km):
             y0 - dy / length * lead_km * 1000.0)
 
 
-def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None):
+def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None,
+                         keep_centre=False):
     """Turn each flagged transit waypoint into a short line flown through it.
 
-    A flagged point gains one waypoint `distance_km` before it and one the same distance
-    after. Two ways to orient that line:
+    A flagged point is *replaced* by one waypoint `distance_km` before it and one the same
+    distance after -- two points, not three. `keep_centre` puts the original back between
+    them. The line is the same either way; the centre is a waypoint the aircraft would
+    overfly regardless, so it costs an FMS slot to say nothing extra.
+
+    Two ways to orient that line:
 
     `heading_deg is None` -- along track, on the course from the previous waypoint to the
     next, so the aircraft flies straight through and the line costs no extra turns. Where
@@ -517,7 +522,12 @@ def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None)
 
         out.append({"ident": None, "lat": start_lat, "lon": start_lon,
                     "name": f"{head}{stem}", "make_line": False})
-        out.append(point)
+        # The centre is dropped by default: the two ends already define the line, and the
+        # aircraft overflies the middle whether or not a waypoint sits there. Keeping it
+        # spends a waypoint out of the FMS budget to say nothing extra. Tick Keep centre
+        # point when the waypoint is itself the target and the box should sequence over it.
+        if keep_centre:
+            out.append(point)
         out.append({"ident": None, "lat": end_lat, "lon": end_lon,
                     "name": f"{tail}{stem}", "make_line": False})
         made += 1
@@ -705,6 +715,9 @@ class FlightPlannerGUI(tk.Tk):
         # Along track, or parallel to the survey lines. Magnetic N-S is the latter with
         # Initial Heading set to 000 less the local variation -- no geomagnetic model here.
         self.make_line_bearing = tk.StringVar(value="Along track")
+        # Off by default: the two ends define the line, so the middle waypoint is a slot
+        # spent on a point the aircraft overflies anyway.
+        self.make_line_keep_centre = tk.BooleanVar(value=False)
 
         # QR view replaces the flight path in the same pane, so the code gets the full
         # width -- a dense survey needs every pixel per module to stay scannable.
@@ -1031,6 +1044,21 @@ class FlightPlannerGUI(tk.Tk):
             "purpose, so that correction is yours to make and never goes stale.")
         ToolTip(bearing_label, bearing_tip)
         ToolTip(bearing_box, bearing_tip)
+        # Shares the bearing's row: the tab already wants 742 px of the 768 available, so
+        # another row would not fit.
+        keep_centre_check = ttk.Checkbutton(transit_tab, text="Keep centre point",
+                                            variable=self.make_line_keep_centre,
+                                            command=self.calculate_and_render)
+        keep_centre_check.grid(row=row_cursor, column=4, columnspan=3, sticky="w", padx=4)
+        ToolTip(keep_centre_check,
+                "OFF (normal): a make-line is its two ends only — NGATE and SGATE, two "
+                "waypoints replacing the one you typed. The ends define the line and the "
+                "aircraft overflies the middle regardless, so a centre waypoint spends an "
+                "FMS slot to say nothing extra.\n\n"
+                "ON: the original waypoint stays between them, giving NGATE, GATE, SGATE. "
+                "Worth it when that point is itself the target and you want the box to "
+                "sequence over it exactly.\n\n"
+                "Affects every make-line, and changes the waypoint count by one per line.")
         row_cursor += 1
 
         ttk.Button(transit_tab, text="Clear All Waypoints",
@@ -1659,6 +1687,7 @@ class FlightPlannerGUI(tk.Tk):
             "skip_edges": self.skip_edges.get(),
             "skip_box": self.skip_box.get(),
             "make_line_bearing": self.make_line_bearing.get(),
+            "make_line_keep_centre": self.make_line_keep_centre.get(),
             "boundary": boundary,
             "transit": {
                 group: [{"ident": i.get().strip(), "lat": la.get().strip(),
@@ -1695,6 +1724,8 @@ class FlightPlannerGUI(tk.Tk):
             self.survey_only.set(bool(data["survey_only"]))
         if "skip_box" in data:
             self.skip_box.set(bool(data["skip_box"]))
+        if "make_line_keep_centre" in data:
+            self.make_line_keep_centre.set(bool(data["make_line_keep_centre"]))
         if "make_line_bearing" in data:
             # Anything the dropdown does not offer falls back rather than wedging the combo.
             self.make_line_bearing.set(
@@ -1935,10 +1966,11 @@ class FlightPlannerGUI(tk.Tk):
         # track derives the course from them. Magnetic N-S is the former with Initial
         # Heading set to 000 less the variation.
         line_heading = heading if self.make_line_bearing.get() == "Survey heading" else None
+        keep_centre = self.make_line_keep_centre.get()
         before, made_b, skipped_b = expand_transit_lines(
-            before, make_line_km, to_m.transform, xy_to_latlon, line_heading)
+            before, make_line_km, to_m.transform, xy_to_latlon, line_heading, keep_centre)
         after, made_a, skipped_a = expand_transit_lines(
-            after, make_line_km, to_m.transform, xy_to_latlon, line_heading)
+            after, make_line_km, to_m.transform, xy_to_latlon, line_heading, keep_centre)
         made_lines, skipped_lines = made_b + made_a, skipped_b + skipped_a
 
         mapped_before = [p for p in before if p["lat"] is not None]
@@ -2130,7 +2162,8 @@ class FlightPlannerGUI(tk.Tk):
         # being flown.
         if made_lines or skipped_lines:
             note = (f"Make-Line: {made_lines} line(s) at {make_line_km:.2f} km each side, "
-                    f"{self.make_line_bearing.get().lower()}")
+                    f"{self.make_line_bearing.get().lower()}, "
+                    f"{'3 pts' if keep_centre else '2 pts'} each")
             if skipped_lines:
                 # Naming the reason, because a tick that quietly did nothing is the
                 # failure mode worth guarding against here.

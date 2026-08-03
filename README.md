@@ -136,8 +136,12 @@ just passing over it: one point the **Make-Line Distance** (default 20 km) befor
 the same distance after, so 20 gives a 40 km line centred on the waypoint. A mini survey line
 wherever you want one.
 
-The ends are named for the compass end they sit at, like the survey lines: `GATE` becomes
-`NGATE`, `GATE`, `SGATE`.
+The ends are named for the compass end they sit at, like the survey lines, and they
+**replace** the waypoint you typed — `GATE` becomes `NGATE`, `SGATE`. Two points, not three:
+the ends already define the line, and the aircraft overflies the middle either way, so a
+centre waypoint spends an FMS slot to say nothing extra. Tick **Keep centre point** to put it
+back — worth it when that waypoint is itself the target and you want the box to sequence over
+it exactly.
 
 **Make-Line Bearing** sets which way they all run:
 
