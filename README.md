@@ -116,8 +116,8 @@ through. The return keeps its line's number and revisits its names, so three row
 turns between rows do not, so the total grows by less than 2x.
 
 The **Waypoints** tab adds transit legs flown before reaching the box and after leaving it,
-on top of the origin and destination airports. Each row takes **either** an identifier
-(`BOI`, `DANDD`) **or** a lat/lon pair:
+on top of the origin and destination airports — 10 rows each side. Each row takes **either**
+an identifier (`BOI`, `DANDD`) **or** a lat/lon pair:
 
 - An **identifier** goes into the route link as-is for ForeFlight to resolve. It costs about
   6 characters against 25 for a coordinate pair, which keeps the QR sparser — but its
@@ -130,6 +130,21 @@ The survey box is entered at whichever corner is nearest the last transit waypoi
 than always at line 1's start — approaching the default area from the north, that is a
 23.98 km run in instead of 43.55 km across the box and back. The ground covered is
 identical either way.
+
+Ticking **Line** on a transit row flies a short survey line through that waypoint instead of
+just passing over it: one point the **Make-Line Distance** (default 20 km) before it and one
+the same distance after, so 20 gives a 40 km line centred on the waypoint. A mini survey line
+wherever you want one.
+
+The line runs **along your course** — the bearing from the waypoint above to the one below —
+so it adds distance but no turns, and you arrive already on track. The ends are named for the
+compass end they sit at, like the survey lines: `GATE` becomes `NGATE`, `GATE`, `SGATE`.
+
+It is only available on a row with a lat/lon waypoint directly **above and below** it in the
+same group. The airports do not count, because this app never learns where an identifier
+sits, and neither does the survey box, because which corner it starts at is not decided until
+later. So with three transit rows only the middle one qualifies. A ticked row that does not
+qualify is reported in the summary rather than silently ignored.
 
 Both coordinate grids have **Move** buttons on each row, so a new point can be slotted
 between two filled rows rather than only appended. Rows are read top to bottom. On the

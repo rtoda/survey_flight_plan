@@ -34,7 +34,7 @@ PLANS_DIR = "plans"
 LAST_PLAN_POINTER = ".last_plan"
 
 # Rows offered for transit waypoints, in each of the before/after groups.
-TRANSIT_ROWS = 6
+TRANSIT_ROWS = 10
 
 # "Waypoint names entered into the navigation data base are limited to a maximum of five
 # characters" -- Jeppesen NavData name conventions, following ARINC 424. Anything longer is
@@ -436,6 +436,66 @@ def lead_in_point(first_segment, lead_km):
         return None
     return (x0 - dx / length * lead_km * 1000.0,
             y0 - dy / length * lead_km * 1000.0)
+
+
+def expand_transit_lines(points, distance_km, to_m, to_latlon):
+    """Turn each flagged transit waypoint into a short line flown through it.
+
+    A flagged point gains one waypoint `distance_km` before it and one the same distance
+    after, both on the course from the previous waypoint to the next. Running along track
+    rather than on the survey heading means the aircraft flies straight through and the
+    mini-line costs no extra turns.
+
+    Only genuinely interior points qualify: the point itself and both its neighbours must
+    carry coordinates. Neither the airports nor the survey box count as a neighbour -- the
+    airports because this app never learns where an identifier is, and the box because which
+    corner it starts at is not decided until after this has run.
+
+    The two new ends are named by the compass end they sit at, like the survey lines are:
+    a line through GATE becomes NGATE / GATE / SGATE. The stem is cut to four characters so
+    the name still clears the five-character ceiling.
+
+    Returns (expanded_points, made, skipped) -- skipped counts flagged points that did not
+    qualify, so the caller can say so rather than silently ignoring the request.
+    """
+    if distance_km <= 0:
+        return list(points), 0, sum(1 for p in points if p.get("make_line"))
+
+    placed = [p["lat"] is not None for p in points]
+    out, made, skipped = [], 0, 0
+    for i, point in enumerate(points):
+        if not point.get("make_line"):
+            out.append(point)
+            continue
+        if not (0 < i < len(points) - 1 and placed[i] and placed[i - 1] and placed[i + 1]):
+            skipped += 1
+            out.append(point)
+            continue
+
+        px, py = to_m(point["lon"], point["lat"])
+        ax, ay = to_m(points[i - 1]["lon"], points[i - 1]["lat"])
+        bx, by = to_m(points[i + 1]["lon"], points[i + 1]["lat"])
+        span = math.hypot(bx - ax, by - ay)
+        if span == 0:                      # neighbours on top of each other: no course
+            skipped += 1
+            out.append(point)
+            continue
+
+        ux, uy = (bx - ax) / span, (by - ay) / span
+        reach = distance_km * 1000.0
+        start_xy = (px - ux * reach, py - uy * reach)
+        end_xy = (px + ux * reach, py + uy * reach)
+        head, tail = line_end_labels(LineString([start_xy, end_xy]))
+        stem = point["name"][:4]
+        (start_lat, start_lon), (end_lat, end_lon) = to_latlon([start_xy, end_xy])
+
+        out.append({"ident": None, "lat": start_lat, "lon": start_lon,
+                    "name": f"{head}{stem}", "make_line": False})
+        out.append(point)
+        out.append({"ident": None, "lat": end_lat, "lon": end_lon,
+                    "name": f"{tail}{stem}", "make_line": False})
+        made += 1
+    return out, made, skipped
 
 
 def foreflight_waypoint_name(raw, fallback):
@@ -847,9 +907,22 @@ class FlightPlannerGUI(tk.Tk):
             for col, title in enumerate(("#", "Identifier", "Latitude", "Longitude", "Label")):
                 ttk.Label(transit_tab, text=title, font=("Helvetica", 9, "bold")).grid(
                     row=row_cursor, column=col, padx=2, pady=2)
+            line_header = ttk.Label(transit_tab, text="Line", font=("Helvetica", 9, "bold"))
+            line_header.grid(row=row_cursor, column=5, padx=2, pady=2)
+            ToolTip(line_header,
+                    "Fly a short survey line through this waypoint instead of just passing "
+                    "over it: one point the Make-Line Distance before it and one the same "
+                    "after, so you arrive already on track.\n\n"
+                    "The line runs along your course — the bearing from the waypoint above "
+                    "to the one below — so it adds distance but no turns.\n\n"
+                    "Only available on a row with a lat/lon waypoint directly above AND "
+                    "below it in the same group. The airports do not count (this app never "
+                    "learns where an identifier is) and neither does the survey box (which "
+                    "corner it starts at is not decided until later). A ticked row that "
+                    "does not qualify is reported in the summary, not silently dropped.")
             transit_move_header = ttk.Label(transit_tab, text="Move",
                                             font=("Helvetica", 9, "bold"))
-            transit_move_header.grid(row=row_cursor, column=5, columnspan=2, padx=2, pady=2)
+            transit_move_header.grid(row=row_cursor, column=6, columnspan=2, padx=2, pady=2)
             ToolTip(transit_move_header,
                     "Swap a row with the one above or below, so a new waypoint can be "
                     "slotted between two filled rows.\n\n"
@@ -866,10 +939,31 @@ class FlightPlannerGUI(tk.Tk):
                 label = ttk.Entry(transit_tab, width=12)
                 for col, widget in enumerate((ident, lat, lon, label), start=1):
                     widget.grid(row=row_cursor, column=col, padx=3, pady=2)
-                rows.append((ident, lat, lon, label))
-                self._add_row_movers(transit_tab, rows, i, row_cursor, 5)
+                # Last in the tuple so the four Entries keep their positions for every
+                # existing consumer; _move_row and _clear_transit_fields special-case it.
+                make_line = tk.BooleanVar(value=False)
+                ttk.Checkbutton(transit_tab, variable=make_line).grid(
+                    row=row_cursor, column=5, padx=2, pady=2)
+                rows.append((ident, lat, lon, label, make_line))
+                self._add_row_movers(transit_tab, rows, i, row_cursor, 6)
                 row_cursor += 1
             self.transit_rows[group] = rows
+
+        # Lives here rather than on the parameters tab because it is meaningless without the
+        # Line checkboxes beside it. Registered in self.inputs like every other field, so it
+        # round-trips through the plan JSON for free.
+        make_line_label = ttk.Label(transit_tab, text="Make-Line Distance (km):")
+        make_line_label.grid(row=row_cursor, column=0, columnspan=2, sticky="w", pady=(10, 2))
+        make_line_entry = ttk.Entry(transit_tab, width=11)
+        make_line_entry.insert(0, "20.0")
+        make_line_entry.grid(row=row_cursor, column=2, sticky="w", pady=(10, 2))
+        self.inputs["make_line_km"] = make_line_entry
+        make_line_tip = ("How far before and after a ticked waypoint its line ends sit, so "
+                         "20 gives a 40 km line centred on the waypoint.\n\n"
+                         "Applies to every ticked row. 0 turns them all off.")
+        ToolTip(make_line_label, make_line_tip)
+        ToolTip(make_line_entry, make_line_tip)
+        row_cursor += 1
 
         ttk.Button(transit_tab, text="Clear All Waypoints",
                    command=self._clear_transit_fields).grid(
@@ -1407,6 +1501,11 @@ class FlightPlannerGUI(tk.Tk):
             return
         for here, there in zip(rows[index], rows[target]):
             mine, theirs = here.get(), there.get()
+            # The make-line flag travels with its row, so a moved waypoint keeps its setting.
+            if isinstance(here, tk.Variable):
+                here.set(theirs)
+                there.set(mine)
+                continue
             here.delete(0, tk.END)
             here.insert(0, theirs)
             there.delete(0, tk.END)
@@ -1423,7 +1522,11 @@ class FlightPlannerGUI(tk.Tk):
         for rows in self.transit_rows.values():
             for widgets in rows:
                 for widget in widgets:
-                    widget.delete(0, tk.END)
+                    # The make-line flag is a BooleanVar sitting in the same tuple.
+                    if isinstance(widget, tk.Variable):
+                        widget.set(False)
+                    else:
+                        widget.delete(0, tk.END)
 
     def _get_transit_points(self, group, line_prefix):
         """Transit waypoints for one group, in the order flown.
@@ -1434,7 +1537,8 @@ class FlightPlannerGUI(tk.Tk):
         """
         tag = 'B' if group == 'before' else 'A'
         points = []
-        for idx, (ident_e, lat_e, lon_e, label_e) in enumerate(self.transit_rows[group], start=1):
+        for idx, (ident_e, lat_e, lon_e, label_e, make_line) in enumerate(
+                self.transit_rows[group], start=1):
             ident = ident_e.get().strip().upper()
             lat_raw, lon_raw = lat_e.get().strip(), lon_e.get().strip()
             if not (ident or lat_raw or lon_raw):
@@ -1457,6 +1561,7 @@ class FlightPlannerGUI(tk.Tk):
                 "lat": lat,
                 "lon": lon,
                 "name": foreflight_waypoint_name(label_e.get() or ident, fallback),
+                "make_line": bool(make_line.get()),
             })
         return points
 
@@ -1485,8 +1590,9 @@ class FlightPlannerGUI(tk.Tk):
             "boundary": boundary,
             "transit": {
                 group: [{"ident": i.get().strip(), "lat": la.get().strip(),
-                         "lon": lo.get().strip(), "label": lb.get().strip()}
-                        for i, la, lo, lb in rows
+                         "lon": lo.get().strip(), "label": lb.get().strip(),
+                         "make_line": bool(ml.get())}
+                        for i, la, lo, lb, ml in rows
                         if any(w.get().strip() for w in (i, la, lo, lb))]
                 for group, rows in self.transit_rows.items()
             },
@@ -1552,6 +1658,8 @@ class FlightPlannerGUI(tk.Tk):
             for widgets, point in zip(rows, transit.get(group, [])):
                 for widget, key in zip(widgets, ("ident", "lat", "lon", "label")):
                     widget.insert(0, str(point.get(key, "")))
+                # Absent in plans saved before make-line existed, which means off.
+                widgets[4].set(bool(point.get("make_line", False)))
 
     def _plans_root(self):
         root = os.path.join(os.getcwd(), PLANS_DIR)
@@ -1736,6 +1844,19 @@ class FlightPlannerGUI(tk.Tk):
             messagebox.showerror("Input Error", str(err))
             return
 
+        # Mini survey lines through flagged waypoints. Done here, before the entry/exit hints
+        # below, because a line changes which point the aircraft actually arrives from -- the
+        # corner choice must see the line's far end, not the waypoint at its middle.
+        try:
+            make_line_km = max(0.0, float(self.inputs["make_line_km"].get()))
+        except ValueError:
+            make_line_km = 0.0
+        before, made_b, skipped_b = expand_transit_lines(
+            before, make_line_km, to_m.transform, xy_to_latlon)
+        after, made_a, skipped_a = expand_transit_lines(
+            after, make_line_km, to_m.transform, xy_to_latlon)
+        made_lines, skipped_lines = made_b + made_a, skipped_b + skipped_a
+
         mapped_before = [p for p in before if p["lat"] is not None]
         mapped_after = [p for p in after if p["lat"] is not None]
         entry_xy = to_m.transform(mapped_before[-1]["lon"], mapped_before[-1]["lat"]) \
@@ -1901,6 +2022,14 @@ class FlightPlannerGUI(tk.Tk):
             unmapped = (len(before) - len(mapped_before)) + (len(after) - len(mapped_after))
             stats_output.append(
                 f"Transit Legs: {len(before)} before / {len(after)} after")
+            if made_lines or skipped_lines:
+                note = f"Make-Line: {made_lines} line(s) at {make_line_km:.2f} km each side"
+                if skipped_lines:
+                    # Naming the reason, because a tick that quietly did nothing is the
+                    # failure mode worth guarding against here.
+                    note += (f"; {skipped_lines} skipped (needs a lat/lon waypoint directly "
+                             f"above and below)")
+                stats_output.append(note)
             stats_output.append(
                 f"Transit Path: {transit_m/1000:.2f} km ({transit_nm:.2f} nm)"
                 + (f"  [{unmapped} by identifier, not counted]" if unmapped else ""))
