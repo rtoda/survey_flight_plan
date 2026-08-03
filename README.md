@@ -136,15 +136,29 @@ just passing over it: one point the **Make-Line Distance** (default 20 km) befor
 the same distance after, so 20 gives a 40 km line centred on the waypoint. A mini survey line
 wherever you want one.
 
-The line runs **along your course** — the bearing from the waypoint above to the one below —
-so it adds distance but no turns, and you arrive already on track. The ends are named for the
-compass end they sit at, like the survey lines: `GATE` becomes `NGATE`, `GATE`, `SGATE`.
+The ends are named for the compass end they sit at, like the survey lines: `GATE` becomes
+`NGATE`, `GATE`, `SGATE`.
 
-It is only available on a row with a lat/lon waypoint directly **above and below** it in the
-same group. The airports do not count, because this app never learns where an identifier
-sits, and neither does the survey box, because which corner it starts at is not decided until
-later. So with three transit rows only the middle one qualifies. A ticked row that does not
-qualify is reported in the summary rather than silently ignored.
+**Make-Line Bearing** sets which way they all run:
+
+- **Along track** — the course from the waypoint above to the one below, so you fly straight
+  through and add no turns. Where only one neighbour has coordinates, that single leg's
+  course is used, so a row against the box or an airport still works. Only a waypoint with no
+  placed neighbour at all has no course to follow, and that is reported in the summary.
+- **Survey heading** — parallel to the survey lines, on **Initial Heading**, so the sensor
+  sees the same geometry as the box does. Needs no neighbours, so it works on any waypoint.
+
+For **magnetic north-south**, set Initial Heading to 000 minus the local variation — `346.5`
+for 13.5°E. The app carries no geomagnetic model on purpose: that keeps one number under your
+control, off a chart you already have, and it never expires the way a World Magnetic Model
+epoch does.
+
+**Skip survey box**, on the parameters tab, is the exact opposite of Survey box only: it
+drops the box entirely and flies just the transit waypoints and their make-lines. For a
+sortie that is a handful of targeted lines rather than an area survey. There is no coverage
+to measure without a box, so Actual Padding reads `n/a`. Ticking it together with Survey box
+only leaves nothing to fly and is refused, as is ticking it with fewer than two placed
+transit waypoints.
 
 Both coordinate grids have **Move** buttons on each row, so a new point can be slotted
 between two filled rows rather than only appended. Rows are read top to bottom. On the

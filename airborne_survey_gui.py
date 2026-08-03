@@ -359,15 +359,18 @@ def build_survey_kml(area_name, envelope_latlon, track_latlon, waypoints, bounda
       f'      <IconStyle><color>{kml_colour("7b2fbe")}</color><scale>0.9</scale></IconStyle>\n'
       '    </Style>\n')
 
-    w('    <Folder>\n      <name>Survey area</name>\n')
-    w('      <Placemark>\n'
-      f'        <name>{xml_escape(area_name)} buffer envelope</name>\n'
-      '        <styleUrl>#envelope</styleUrl>\n'
-      '        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs>'
-      f'<LinearRing><coordinates>{coords(envelope_latlon)}</coordinates></LinearRing>'
-      '</outerBoundaryIs></Polygon>\n'
-      '      </Placemark>\n')
-    w('    </Folder>\n')
+    # Empty when the survey box is skipped. A Polygon with no coordinates is not valid KML,
+    # so the folder goes away rather than being emitted hollow.
+    if envelope_latlon:
+        w('    <Folder>\n      <name>Survey area</name>\n')
+        w('      <Placemark>\n'
+          f'        <name>{xml_escape(area_name)} buffer envelope</name>\n'
+          '        <styleUrl>#envelope</styleUrl>\n'
+          '        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs>'
+          f'<LinearRing><coordinates>{coords(envelope_latlon)}</coordinates></LinearRing>'
+          '</outerBoundaryIs></Polygon>\n'
+          '      </Placemark>\n')
+        w('    </Folder>\n')
 
     w('    <Folder>\n      <name>Flight track</name>\n')
     w('      <Placemark>\n'
@@ -438,18 +441,22 @@ def lead_in_point(first_segment, lead_km):
             y0 - dy / length * lead_km * 1000.0)
 
 
-def expand_transit_lines(points, distance_km, to_m, to_latlon):
+def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None):
     """Turn each flagged transit waypoint into a short line flown through it.
 
     A flagged point gains one waypoint `distance_km` before it and one the same distance
-    after, both on the course from the previous waypoint to the next. Running along track
-    rather than on the survey heading means the aircraft flies straight through and the
-    mini-line costs no extra turns.
+    after. Two ways to orient that line:
 
-    Only genuinely interior points qualify: the point itself and both its neighbours must
-    carry coordinates. Neither the airports nor the survey box count as a neighbour -- the
-    airports because this app never learns where an identifier is, and the box because which
-    corner it starts at is not decided until after this has run.
+    `heading_deg is None` -- along track, on the course from the previous waypoint to the
+    next, so the aircraft flies straight through and the line costs no extra turns. Where
+    only one neighbour carries coordinates the single leg's course is used instead, which is
+    what lets a row against the survey box or an airport still make a line. A point with no
+    placed neighbour at all has no course to follow and is skipped.
+
+    `heading_deg` set -- every line runs on that bearing regardless of neighbours, so it is
+    parallel to the survey lines and the sensor sees the same geometry. Magnetic north-south
+    is this with Initial Heading set to 000 minus the local variation; the app deliberately
+    carries no geomagnetic model, so the pilot supplies that correction natively.
 
     The two new ends are named by the compass end they sit at, like the survey lines are:
     a line through GATE becomes NGATE / GATE / SGATE. The stem is cut to four characters so
@@ -461,27 +468,46 @@ def expand_transit_lines(points, distance_km, to_m, to_latlon):
     if distance_km <= 0:
         return list(points), 0, sum(1 for p in points if p.get("make_line"))
 
+    fixed = None
+    if heading_deg is not None:
+        # UTM x runs east and y north, and a bearing is clockwise from north.
+        radians = math.radians(heading_deg)
+        fixed = (math.sin(radians), math.cos(radians))
+
     placed = [p["lat"] is not None for p in points]
     out, made, skipped = [], 0, 0
     for i, point in enumerate(points):
         if not point.get("make_line"):
             out.append(point)
             continue
-        if not (0 < i < len(points) - 1 and placed[i] and placed[i - 1] and placed[i + 1]):
+        if not placed[i]:                  # an identifier has no position to build from
             skipped += 1
             out.append(point)
             continue
 
         px, py = to_m(point["lon"], point["lat"])
-        ax, ay = to_m(points[i - 1]["lon"], points[i - 1]["lat"])
-        bx, by = to_m(points[i + 1]["lon"], points[i + 1]["lat"])
-        span = math.hypot(bx - ax, by - ay)
-        if span == 0:                      # neighbours on top of each other: no course
-            skipped += 1
-            out.append(point)
-            continue
+        direction = fixed
+        if direction is None:
+            back = i - 1 if i > 0 and placed[i - 1] else None
+            fwd = i + 1 if i + 1 < len(points) and placed[i + 1] else None
+            if back is None and fwd is None:
+                skipped += 1
+                out.append(point)
+                continue
+            # Missing either side falls back to this point, turning the through course into
+            # the single leg's own course.
+            ax, ay = to_m(points[back]["lon"], points[back]["lat"]) if back is not None \
+                else (px, py)
+            bx, by = to_m(points[fwd]["lon"], points[fwd]["lat"]) if fwd is not None \
+                else (px, py)
+            span = math.hypot(bx - ax, by - ay)
+            if span == 0:                  # neighbours on top of each other: no course
+                skipped += 1
+                out.append(point)
+                continue
+            direction = ((bx - ax) / span, (by - ay) / span)
 
-        ux, uy = (bx - ax) / span, (by - ay) / span
+        ux, uy = direction
         reach = distance_km * 1000.0
         start_xy = (px - ux * reach, py - uy * reach)
         end_xy = (px + ux * reach, py + uy * reach)
@@ -673,6 +699,12 @@ class FlightPlannerGUI(tk.Tk):
         # Rows dropped from each end of the box. Trades coverage at the edges for flight
         # time; the summary reports the padding that survives, which may go negative.
         self.skip_edges = tk.StringVar(value="0")
+        # The exact inverse of survey_only: fly the transit waypoints and their make-lines
+        # and no box at all. Both ticked would leave nothing, which is refused.
+        self.skip_box = tk.BooleanVar(value=False)
+        # Along track, or parallel to the survey lines. Magnetic N-S is the latter with
+        # Initial Heading set to 000 less the local variation -- no geomagnetic model here.
+        self.make_line_bearing = tk.StringVar(value="Along track")
 
         # QR view replaces the flight path in the same pane, so the code gets the full
         # width -- a dense survey needs every pixel per module to stay scannable.
@@ -781,6 +813,20 @@ class FlightPlannerGUI(tk.Tk):
                                             variable=self.survey_only,
                                             command=self.calculate_and_render)
         survey_only_check.grid(row=7, column=1, sticky="w", padx=10)
+        # Column 0 of this row is free -- the two opposite filters sit side by side.
+        skip_box_check = ttk.Checkbutton(param_tab, text="Skip survey box",
+                                         variable=self.skip_box,
+                                         command=self.calculate_and_render)
+        skip_box_check.grid(row=7, column=0, sticky="w")
+        ToolTip(skip_box_check,
+                "Drop the survey box entirely and fly only the transit waypoints and any "
+                "make-lines through them. The exact opposite of Survey box only.\n\n"
+                "For a sortie that is a handful of targeted lines rather than an area "
+                "survey — tick Line on the waypoints you want lines through, and this "
+                "removes the box around them.\n\n"
+                "There is no coverage to measure without a box, so Actual Padding reads "
+                "n/a. Ticking this and Survey box only together leaves nothing to fly and "
+                "is refused.")
         ToolTip(survey_only_check,
                 "Show and export the survey lines alone — no lead-in waypoint, no transit "
                 "legs. For working on the box without the run-in cluttering the view.\n\n"
@@ -963,6 +1009,28 @@ class FlightPlannerGUI(tk.Tk):
                          "Applies to every ticked row. 0 turns them all off.")
         ToolTip(make_line_label, make_line_tip)
         ToolTip(make_line_entry, make_line_tip)
+        row_cursor += 1
+
+        bearing_label = ttk.Label(transit_tab, text="Make-Line Bearing:")
+        bearing_label.grid(row=row_cursor, column=0, columnspan=2, sticky="w", pady=(2, 2))
+        bearing_box = ttk.Combobox(transit_tab, width=14, state="readonly",
+                                   values=("Along track", "Survey heading"),
+                                   textvariable=self.make_line_bearing)
+        bearing_box.grid(row=row_cursor, column=2, columnspan=2, sticky="w", pady=(2, 2))
+        bearing_box.bind("<<ComboboxSelected>>", lambda _e: self.calculate_and_render())
+        bearing_tip = (
+            "Which way every make-line runs.\n\n"
+            "Along track: the course from the waypoint above to the one below, so you fly "
+            "straight through and add no turns. Where only one neighbour has coordinates — "
+            "a row against the box or an airport — that single leg's course is used.\n\n"
+            "Survey heading: parallel to the survey lines, on Initial Heading, so the "
+            "sensor sees the same geometry as the box does. Needs no neighbours at all, so "
+            "it works on any placed waypoint. Costs a turn onto and off each line.\n\n"
+            "For magnetic north-south, set Initial Heading to 000 minus the local "
+            "variation — 346.5 for 13.5°E. This app carries no geomagnetic model on "
+            "purpose, so that correction is yours to make and never goes stale.")
+        ToolTip(bearing_label, bearing_tip)
+        ToolTip(bearing_box, bearing_tip)
         row_cursor += 1
 
         ttk.Button(transit_tab, text="Clear All Waypoints",
@@ -1356,9 +1424,11 @@ class FlightPlannerGUI(tk.Tk):
             return (off_x + (point[0] - min_x) * scale,
                     base_y - (point[1] - min_y) * scale)
 
-        # Target buffer envelope
-        rect_px = [coord for point in rect for coord in to_px(point)]
-        canvas.create_polygon(rect_px, fill="#eaf1fb", outline="#1f6fd0", width=2)
+        # Target buffer envelope. Empty when the survey box is skipped -- create_polygon on
+        # an empty coordinate list raises rather than drawing nothing.
+        if rect:
+            rect_px = [coord for point in rect for coord in to_px(point)]
+            canvas.create_polygon(rect_px, fill="#eaf1fb", outline="#1f6fd0", width=2)
 
         # Transit legs, drawn under the survey track so the survey stays dominant
         if track:
@@ -1587,6 +1657,8 @@ class FlightPlannerGUI(tk.Tk):
             "retrace_lines": self.retrace_lines.get(),
             "survey_only": self.survey_only.get(),
             "skip_edges": self.skip_edges.get(),
+            "skip_box": self.skip_box.get(),
+            "make_line_bearing": self.make_line_bearing.get(),
             "boundary": boundary,
             "transit": {
                 group: [{"ident": i.get().strip(), "lat": la.get().strip(),
@@ -1621,6 +1693,14 @@ class FlightPlannerGUI(tk.Tk):
             self.retrace_lines.set(bool(data["retrace_lines"]))
         if "survey_only" in data:
             self.survey_only.set(bool(data["survey_only"]))
+        if "skip_box" in data:
+            self.skip_box.set(bool(data["skip_box"]))
+        if "make_line_bearing" in data:
+            # Anything the dropdown does not offer falls back rather than wedging the combo.
+            self.make_line_bearing.set(
+                data["make_line_bearing"]
+                if data["make_line_bearing"] in ("Along track", "Survey heading")
+                else "Along track")
         if "skip_edges" in data:
             # Clamped to the dropdown's range in case the file was hand-edited.
             try:
@@ -1851,10 +1931,14 @@ class FlightPlannerGUI(tk.Tk):
             make_line_km = max(0.0, float(self.inputs["make_line_km"].get()))
         except ValueError:
             make_line_km = 0.0
+        # "Survey heading" needs no neighbours, so it works on any placed waypoint; along
+        # track derives the course from them. Magnetic N-S is the former with Initial
+        # Heading set to 000 less the variation.
+        line_heading = heading if self.make_line_bearing.get() == "Survey heading" else None
         before, made_b, skipped_b = expand_transit_lines(
-            before, make_line_km, to_m.transform, xy_to_latlon)
+            before, make_line_km, to_m.transform, xy_to_latlon, line_heading)
         after, made_a, skipped_a = expand_transit_lines(
-            after, make_line_km, to_m.transform, xy_to_latlon)
+            after, make_line_km, to_m.transform, xy_to_latlon, line_heading)
         made_lines, skipped_lines = made_b + made_a, skipped_b + skipped_a
 
         mapped_before = [p for p in before if p["lat"] is not None]
@@ -1872,20 +1956,42 @@ class FlightPlannerGUI(tk.Tk):
         # flag to keep in step. If this ran before the hints, ticking a view checkbox would
         # silently move the survey, which is exactly the trap worth avoiding.
         survey_only = self.survey_only.get()
+        skip_box = self.skip_box.get()
+        if survey_only and skip_box:
+            messagebox.showerror(
+                "Nothing To Fly",
+                "Survey box only and Skip survey box are both ticked. One keeps just the "
+                "box, the other drops it — between them they exclude everything.\n\n"
+                "Untick whichever one you did not mean.")
+            return
         if survey_only:
             before = after = []
             mapped_before = mapped_after = []
 
-        try:
-            survey_poly, survey_pattern, segments, line_numbers = build_rectangular_pattern(
-                survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m, center_lat,
-                rectangular=self.rectangular_box.get(), repeats=repeats,
-                retrace=self.retrace_lines.get(), entry_xy=entry_xy, exit_xy=exit_xy,
-                skip_edges=skip_edges
-            )
-        except Exception as e:
-            messagebox.showerror("Execution Error", str(e))
-            return
+        if skip_box:
+            # No box at all: the sortie is the transit chain and whatever make-lines sit on
+            # it. survey_poly stays None, and every consumer of it is guarded below.
+            survey_poly, segments, line_numbers = None, [], []
+            chain = [to_m.transform(p["lon"], p["lat"]) for p in mapped_before + mapped_after]
+            if len(chain) < 2:
+                messagebox.showerror(
+                    "Nothing To Fly",
+                    "Skip survey box is ticked, so the plan is the transit waypoints alone "
+                    "— and fewer than two of them carry coordinates.\n\n"
+                    "Add waypoints on the Waypoints tab, or untick Skip survey box.")
+                return
+            survey_pattern = LineString(chain)
+        else:
+            try:
+                survey_poly, survey_pattern, segments, line_numbers = build_rectangular_pattern(
+                    survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m,
+                    center_lat, rectangular=self.rectangular_box.get(), repeats=repeats,
+                    retrace=self.retrace_lines.get(), entry_xy=entry_xy, exit_xy=exit_xy,
+                    skip_edges=skip_edges
+                )
+            except Exception as e:
+                messagebox.showerror("Execution Error", str(e))
+                return
 
         # 6. Every artefact for this plan lands in plans/<name>/, and that folder carries
         #    the plan itself so it can be reloaded without retyping the points.
@@ -1930,7 +2036,7 @@ class FlightPlannerGUI(tk.Tk):
 
         kml_text = build_survey_kml(
             area_name,
-            xy_to_latlon(list(survey_poly.exterior.coords)),
+            xy_to_latlon(list(survey_poly.exterior.coords)) if survey_poly else [],
             xy_to_latlon(list(survey_pattern.coords)),
             waypoints, survey_boundary, meta, generated_utc,
         )
@@ -1954,8 +2060,12 @@ class FlightPlannerGUI(tk.Tk):
 
         # Verify the padding actually achieved rather than assuming the request was met.
         target_poly = Polygon([to_m.transform(lon, lat) for lat, lon, _ in survey_boundary]).buffer(0)
-        clearance_m = measure_clearance(target_poly, survey_poly)
-        if clearance_m < 0:
+        # Nothing covers the target when the box is skipped, so there is no padding to
+        # report. Saying n/a beats printing a number that describes a box nobody is flying.
+        clearance_m = 0.0 if survey_poly is None else measure_clearance(target_poly, survey_poly)
+        if survey_poly is None:
+            margin_note = "Actual Padding: n/a — survey box skipped"
+        elif clearance_m < 0:
             margin_note = (f"Actual Padding: TARGET NOT FULLY COVERED "
                            f"({abs(clearance_m)/1000:.2f} km outside)")
         elif clearance_m < margin * 1000.0 - 1.0:
@@ -1970,22 +2080,26 @@ class FlightPlannerGUI(tk.Tk):
             f"Generated (UTC): {generated_utc}",
             f"Output Folder: {PLANS_DIR}{os.sep}{area_name}{os.sep}",
             f"Active Vertices parsed: {len(survey_boundary)}",
-            f"Pattern: {'Rectangular box' if self.rectangular_box.get() else 'Clipped to target outline'}",
-            f"Repeats: {repeats}x  ({len(segments) // repeats} lines per cycle)",
+            f"Pattern: {'Rectangular box' if self.rectangular_box.get() else 'Clipped to target outline'}"
+            if segments else "Pattern: none — survey box skipped",
+            f"Repeats: {repeats}x  ({len(segments) // repeats} lines per cycle)"
+            if segments else "Repeats: n/a",
             # With retrace on, half the "lines" are return runs over ground already flown,
             # so spell out how many distinct tracks that actually is.
             f"Retrace: on — {max(line_numbers)} lines flown out and back"
-            if self.retrace_lines.get() else "Retrace: off",
+            if self.retrace_lines.get() and segments else "Retrace: off",
             # Distinct lines, then how many passes are flown over them.
-            f"Survey Lines: {max(line_numbers)}   ({len(segments)} passes)",
+            f"Survey Lines: {max(line_numbers)}   ({len(segments)} passes)"
+            if segments else "Survey Lines: none — box skipped",
             f"Skipped Edges: {skip_edges} per end ({2 * skip_edges} lines dropped)"
-            if skip_edges else "Skipped Edges: none",
+            if skip_edges and segments else "Skipped Edges: none",
             # Distinguish "you set it to 0" from "it is set but this view suppresses it",
             # or the panel reads as though the lead-in had been lost.
             f"Lead-in: {lead_in_km:.2f} km on the line bearing" if lead_xy is not None
             else f"Lead-in: {lead_in_km:.2f} km, hidden by Survey box only"
             if survey_only and lead_in_km > 0 else "Lead-in: off",
             "Scope: SURVEY BOX ONLY — lead-in and transit excluded" if survey_only
+            else "Scope: BOX SKIPPED — transit and make-lines only" if skip_box
             else "Scope: full plan",
             f"Ground Heading: {heading:.1f}° True",
             f"Requested Margin: {margin:.2f} km",
@@ -2007,9 +2121,29 @@ class FlightPlannerGUI(tk.Tk):
             f"Route link: {os.path.basename(route_file)}",
         ]
 
+        if before or after:
+            stats_output.append(
+                f"Transit Legs: {len(before)} before / {len(after)} after")
+
+        # Reported whatever the scope: with the box skipped these lines ARE the plan, so
+        # burying the note inside the transit-distance block below would hide the only thing
+        # being flown.
+        if made_lines or skipped_lines:
+            note = (f"Make-Line: {made_lines} line(s) at {make_line_km:.2f} km each side, "
+                    f"{self.make_line_bearing.get().lower()}")
+            if skipped_lines:
+                # Naming the reason, because a tick that quietly did nothing is the
+                # failure mode worth guarding against here.
+                note += (f"; {skipped_lines} skipped (no course — needs a placed waypoint "
+                         f"above or below)")
+            stats_output.append(note)
+
         # Transit distance covers only the rows that carry coordinates: an identifier's
         # position is unknown here, so including it would be a guess.
-        if before or after:
+        # With no box there is nothing to run in to, and the whole chain is already counted
+        # as the flight path above -- measuring legs against a box that is not there would
+        # double-count it.
+        if (before or after) and segments:
             transit_m = 0.0
             for chain, anchor in ((mapped_before, segments[0].coords[0]),
                                   (mapped_after, segments[-1].coords[-1])):
@@ -2020,16 +2154,6 @@ class FlightPlannerGUI(tk.Tk):
                 transit_m += sum(math.dist(a, b) for a, b in zip(legs, legs[1:]))
             transit_nm = transit_m / 1852.0
             unmapped = (len(before) - len(mapped_before)) + (len(after) - len(mapped_after))
-            stats_output.append(
-                f"Transit Legs: {len(before)} before / {len(after)} after")
-            if made_lines or skipped_lines:
-                note = f"Make-Line: {made_lines} line(s) at {make_line_km:.2f} km each side"
-                if skipped_lines:
-                    # Naming the reason, because a tick that quietly did nothing is the
-                    # failure mode worth guarding against here.
-                    note += (f"; {skipped_lines} skipped (needs a lat/lon waypoint directly "
-                             f"above and below)")
-                stats_output.append(note)
             stats_output.append(
                 f"Transit Path: {transit_m/1000:.2f} km ({transit_nm:.2f} nm)"
                 + (f"  [{unmapped} by identifier, not counted]" if unmapped else ""))
@@ -2059,7 +2183,7 @@ class FlightPlannerGUI(tk.Tk):
 
         # 8. Refresh the in-window preview (UTM metres, matching the geometry engine)
         self._preview = {
-            'rect': list(survey_poly.exterior.coords),
+            'rect': list(survey_poly.exterior.coords) if survey_poly else [],
             'track': list(survey_pattern.coords),
             'marks': [(*to_m.transform(lon, lat), label) for lat, lon, label in survey_boundary],
             # Survey line ends only; transit points get their own grey markers below so the
@@ -2096,9 +2220,10 @@ class FlightPlannerGUI(tk.Tk):
             # Colours match the canvas preview so the two views read the same way. Each group
             # is its own FeatureGroup, so LayerControl can switch it off -- the only sane way
             # to cope with a dense survey putting 50+ markers on the map.
-            hull_latlon = xy_to_latlon(list(survey_poly.exterior.coords))
-            folium.PolyLine(hull_latlon, color='#1f6fd0', weight=3, opacity=0.7,
-                            tooltip='Target buffer envelope').add_to(survey_map)
+            if survey_poly is not None:
+                hull_latlon = xy_to_latlon(list(survey_poly.exterior.coords))
+                folium.PolyLine(hull_latlon, color='#1f6fd0', weight=3, opacity=0.7,
+                                tooltip='Target buffer envelope').add_to(survey_map)
 
             pattern_latlon = xy_to_latlon(list(survey_pattern.coords))
             folium.PolyLine(pattern_latlon, color='#d81b1b', weight=4, opacity=0.9,
@@ -2172,7 +2297,8 @@ class FlightPlannerGUI(tk.Tk):
         self.status_var.set(
             f"Generated {generated_utc} (run #{self._run_count}) into "
             f"{PLANS_DIR}{os.sep}{area_name}{os.sep}: "
-            f"{len(segments)} lines, {len(waypoints)} waypoints"
+            f"{len(segments)} lines{' (box skipped)' if skip_box else ''}, "
+            f"{len(waypoints)} waypoints"
             f"{f' (OVER {MAX_FMS_WAYPOINTS} LIMIT)' if over_limit else ''}"
             f"{' [survey box only]' if survey_only else ''}, {dist_nm:.1f} nm, "
             f"{clearance_m/1000:.2f} km padding{' (SHORT — check offsets)' if short else ''}. "
