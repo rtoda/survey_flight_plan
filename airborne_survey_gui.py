@@ -445,10 +445,10 @@ def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None,
                          keep_centre=False):
     """Turn each flagged transit waypoint into a short line flown through it.
 
-    A flagged point is *replaced* by one waypoint `distance_km` before it and one the same
-    distance after -- two points, not three. `keep_centre` puts the original back between
-    them. The line is the same either way; the centre is a waypoint the aircraft would
-    overfly regardless, so it costs an FMS slot to say nothing extra.
+    A flagged point is *replaced* by two waypoints, half of `distance_km` either side of it,
+    so `distance_km` is the whole line end to end. `keep_centre` puts the original back
+    between them. The line is the same either way; the centre is a waypoint the aircraft
+    would overfly regardless, so it costs an FMS slot to say nothing extra.
 
     Two ways to orient that line:
 
@@ -525,7 +525,8 @@ def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None,
             direction = (-fixed[0], -fixed[1])
 
         ux, uy = direction
-        reach = distance_km * 1000.0
+        # distance_km is the whole line, so each end sits half of it from the waypoint.
+        reach = distance_km * 1000.0 / 2.0
         start_xy = (px - ux * reach, py - uy * reach)
         end_xy = (px + ux * reach, py + uy * reach)
         head, tail = line_end_labels(LineString([start_xy, end_xy]))
@@ -1023,14 +1024,14 @@ class FlightPlannerGUI(tk.Tk):
         # Lives here rather than on the parameters tab because it is meaningless without the
         # Line checkboxes beside it. Registered in self.inputs like every other field, so it
         # round-trips through the plan JSON for free.
-        make_line_label = ttk.Label(transit_tab, text="Make-Line Distance (km):")
+        make_line_label = ttk.Label(transit_tab, text="Make-Line Length (km):")
         make_line_label.grid(row=row_cursor, column=0, columnspan=2, sticky="w", pady=(10, 2))
         make_line_entry = ttk.Entry(transit_tab, width=11)
         make_line_entry.insert(0, "20.0")
         make_line_entry.grid(row=row_cursor, column=2, sticky="w", pady=(10, 2))
         self.inputs["make_line_km"] = make_line_entry
-        make_line_tip = ("How far before and after a ticked waypoint its line ends sit, so "
-                         "20 gives a 40 km line centred on the waypoint.\n\n"
+        make_line_tip = ("The whole length of the line, end to end. 20 gives a 20 km line "
+                         "centred on the waypoint — each end sits 10 km from it.\n\n"
                          "Applies to every ticked row. 0 turns them all off.")
         ToolTip(make_line_label, make_line_tip)
         ToolTip(make_line_entry, make_line_tip)
@@ -1063,7 +1064,7 @@ class FlightPlannerGUI(tk.Tk):
                                             command=self.calculate_and_render)
         keep_centre_check.grid(row=row_cursor, column=4, columnspan=3, sticky="w", padx=4)
         ToolTip(keep_centre_check,
-                "OFF (normal): a make-line is its two ends only — NGATE and SGATE, two "
+                "OFF (default): a make-line is its two ends only — NGATE and SGATE, two "
                 "waypoints replacing the one you typed. The ends define the line and the "
                 "aircraft overflies the middle regardless, so a centre waypoint spends an "
                 "FMS slot to say nothing extra.\n\n"
@@ -2173,7 +2174,7 @@ class FlightPlannerGUI(tk.Tk):
         # burying the note inside the transit-distance block below would hide the only thing
         # being flown.
         if made_lines or skipped_lines:
-            note = (f"Make-Line: {made_lines} line(s) at {make_line_km:.2f} km each side, "
+            note = (f"Make-Line: {made_lines} line(s), {make_line_km:.2f} km long, "
                     f"{self.make_line_bearing.get().lower()}, "
                     f"{'3 pts' if keep_centre else '2 pts'} each")
             if skipped_lines:

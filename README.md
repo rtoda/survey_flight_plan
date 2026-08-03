@@ -132,9 +132,9 @@ than always at line 1's start — approaching the default area from the north, t
 identical either way.
 
 Ticking **Line** on a transit row flies a short survey line through that waypoint instead of
-just passing over it: one point the **Make-Line Distance** (default 20 km) before it and one
-the same distance after, so 20 gives a 40 km line centred on the waypoint. A mini survey line
-wherever you want one.
+just passing over it. **Make-Line Length** (default 20 km) is the whole line end to end, so
+20 gives a 20 km line centred on the waypoint with its ends 10 km either side. A mini survey
+line wherever you want one.
 
 The ends are named for the compass end they sit at, like the survey lines, and they
 **replace** the waypoint you typed — `GATE` becomes `NGATE`, `SGATE`. Two points, not three:
