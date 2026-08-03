@@ -491,14 +491,13 @@ def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None,
             continue
 
         px, py = to_m(point["lon"], point["lat"])
-        direction = fixed
-        if direction is None:
-            back = i - 1 if i > 0 and placed[i - 1] else None
-            fwd = i + 1 if i + 1 < len(points) and placed[i + 1] else None
-            if back is None and fwd is None:
-                skipped += 1
-                out.append(point)
-                continue
+
+        # The course actually being flown through this point. Needed by both modes: along
+        # track it *is* the line, and on a fixed heading it decides which end to fly first.
+        course = None
+        back = i - 1 if i > 0 and placed[i - 1] else None
+        fwd = i + 1 if i + 1 < len(points) and placed[i + 1] else None
+        if back is not None or fwd is not None:
             # Missing either side falls back to this point, turning the through course into
             # the single leg's own course.
             ax, ay = to_m(points[back]["lon"], points[back]["lat"]) if back is not None \
@@ -506,11 +505,24 @@ def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None,
             bx, by = to_m(points[fwd]["lon"], points[fwd]["lat"]) if fwd is not None \
                 else (px, py)
             span = math.hypot(bx - ax, by - ay)
-            if span == 0:                  # neighbours on top of each other: no course
-                skipped += 1
-                out.append(point)
-                continue
-            direction = ((bx - ax) / span, (by - ay) / span)
+            if span > 0:                   # zero means neighbours on top of each other
+                course = ((bx - ax) / span, (by - ay) / span)
+
+        direction = fixed if fixed is not None else course
+        if direction is None:
+            skipped += 1
+            out.append(point)
+            continue
+
+        # A fixed heading points the same absolute way on every leg, so on a leg flown
+        # against it the far end would be sequenced first and the aircraft would overshoot,
+        # double back, and go forward again -- visible as a zigzag on the return leg only.
+        # Flying the line the other way round puts it on the same ground in the same
+        # direction of travel, which is what the survey box's own alternating rows already
+        # do. Orientation is preserved; only the order the two ends are reached changes.
+        if fixed is not None and course is not None and \
+                fixed[0] * course[0] + fixed[1] * course[1] < 0:
+            direction = (-fixed[0], -fixed[1])
 
         ux, uy = direction
         reach = distance_km * 1000.0
