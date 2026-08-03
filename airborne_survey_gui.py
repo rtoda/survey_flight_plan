@@ -1,3 +1,6 @@
+import time as _time_for_start
+START_TIME = _time_for_start.perf_counter()   # first line that runs, for the startup report
+
 import os
 import csv
 import io
@@ -14,10 +17,22 @@ from xml.sax.saxutils import escape as xml_escape
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
-import numpy as np
-from shapely.geometry import LineString, Polygon, MultiLineString, GeometryCollection, Point
-from shapely import affinity
-from pyproj import CRS, Transformer
+
+# numpy, shapely and pyproj cost about 460 ms between them and are the reason the window
+# used to sit blank at launch. They load in _load_geometry() instead, once the splash is up,
+# so the user sees something within roughly 200 ms. Everything that uses these names does so
+# from inside a function, which is what makes deferring them safe -- keep it that way.
+def _load_geometry():
+    """Import the geometry stack into module scope. Idempotent and cheap after the first."""
+    global np, LineString, Polygon, MultiLineString, GeometryCollection, Point
+    global affinity, CRS, Transformer
+    if "LineString" in globals():
+        return
+    import numpy as np
+    from shapely.geometry import LineString, Polygon, MultiLineString, GeometryCollection, Point
+    from shapely import affinity
+    from pyproj import CRS, Transformer
+
 
 # folium is imported lazily inside calculate_and_render's render_map(). It costs ~1.1 s of
 # import on its own -- it pulls in the whole of pandas -- and only the HTML map needs it, so
@@ -88,6 +103,7 @@ def summarize_segment_travel(flight_pattern, groundspeed_kt=200.0):
 
 def flatten_linestrings(geom):
     """Every non-degenerate LineString inside an arbitrary intersection result."""
+    _load_geometry()   # safe to call the engine without building the GUI
     if isinstance(geom, LineString):
         return [geom] if geom.length > 0 else []
     if isinstance(geom, (MultiLineString, GeometryCollection)):
@@ -117,6 +133,7 @@ def measure_clearance(target_poly, coverage_poly, samples=400):
 
 
 def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1, retrace=False, entry_xy=None, exit_xy=None, skip_edges=0):
+    _load_geometry()   # safe to call the engine without building the GUI
     if len(latlon_coords) < 3:
         raise ValueError('At least three coordinates are required to define a survey area.')
 
@@ -470,6 +487,7 @@ def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None,
     Returns (expanded_points, made, skipped) -- skipped counts flagged points that did not
     qualify, so the caller can say so rather than silently ignoring the request.
     """
+    _load_geometry()   # safe to call the engine without building the GUI
     if distance_km <= 0:
         return list(points), 0, sum(1 for p in points if p.get("make_line"))
 
@@ -745,15 +763,96 @@ class FlightPlannerGUI(tk.Tk):
         self._view = None
         self._drag_origin = None
 
-        self._setup_layout()
-        self._load_defaults()
-        # Defaults first, then last session's plan over the top, so a failure to restore
-        # leaves a usable app rather than empty fields.
-        restored = self._restore_last_plan()
-        self.calculate_and_render()
-        if restored:
-            self.status_var.set(f"Reopened {os.path.basename(restored)} from your last "
-                                f"session. {self.status_var.get()}")
+        # Everything below is slow enough to look like a hang, so it happens behind a splash.
+        # The window itself stays hidden until there is something worth showing.
+        self._begin_splash()
+        # Phase timings, printed once at the end. Startup varies enormously between machines
+        # -- a cold file cache or an antivirus scanning numpy/shapely/pyproj DLLs can turn a
+        # one-second launch into ten -- and a number beats guessing which part is slow.
+        marks = [("window", time.perf_counter())]
+        try:
+            self._splash_step("Loading geometry libraries…")
+            _load_geometry()
+            marks.append(("geometry", time.perf_counter()))
+            self._splash_step("Building the window…")
+            self._setup_layout()
+            self._load_defaults()
+            marks.append(("layout", time.perf_counter()))
+            # Defaults first, then last session's plan over the top, so a failure to restore
+            # leaves a usable app rather than empty fields.
+            self._splash_step("Reopening your last plan…")
+            restored = self._restore_last_plan()
+            self._splash_step("Generating the survey…")
+            self.calculate_and_render()
+            marks.append(("first plan", time.perf_counter()))
+            if restored:
+                self.status_var.set(f"Reopened {os.path.basename(restored)} from your last "
+                                    f"session. {self.status_var.get()}")
+            spent = " ".join(f"{name} {(b - a):.2f}s" for (_, a), (name, b)
+                             in zip(marks, marks[1:]))
+            total = marks[-1][1] - START_TIME
+            print(f"Startup: {spent} | total {total:.2f}s "
+                  f"(import {marks[0][1] - START_TIME:.2f}s)", flush=True)
+        finally:
+            # In a finally so a failure anywhere above still leaves a usable window rather
+            # than an invisible one behind an orphaned splash.
+            self._end_splash()
+
+    def _begin_splash(self):
+        """Small centred panel shown while the slow parts of startup run.
+
+        Deliberately built from bare Tk with no styling dependencies: it has to appear
+        before the geometry stack is imported, which is most of what it is covering.
+        """
+        self._splash = None
+        try:
+            self.withdraw()
+            splash = tk.Toplevel(self)
+            splash.overrideredirect(True)          # no title bar or controls
+            splash.configure(bg="#1f3b63")
+            frame = tk.Frame(splash, bg="#1f3b63", padx=34, pady=22)
+            frame.pack()
+            tk.Label(frame, text="Airborne Survey Flight Planner", bg="#1f3b63",
+                     fg="#ffffff", font=("Helvetica", 13, "bold")).pack()
+            self._splash_var = tk.StringVar(value="Starting…")
+            tk.Label(frame, textvariable=self._splash_var, bg="#1f3b63", fg="#c7d8ef",
+                     font=("Helvetica", 10), width=34).pack(pady=(8, 0))
+            splash.update_idletasks()
+            w, h = splash.winfo_reqwidth(), splash.winfo_reqheight()
+            x = (splash.winfo_screenwidth() - w) // 2
+            y = (splash.winfo_screenheight() - h) // 2
+            splash.geometry(f"{w}x{h}+{x}+{y}")
+            splash.update()
+            self._splash = splash
+        except Exception:
+            # A splash is a courtesy; never let it stop the app opening.
+            self._splash = None
+            try:
+                self.deiconify()
+            except Exception:
+                pass
+
+    def _splash_step(self, message):
+        if self._splash is None:
+            return
+        try:
+            self._splash_var.set(message)
+            self._splash.update()
+        except Exception:
+            self._splash = None
+
+    def _end_splash(self):
+        if self._splash is not None:
+            try:
+                self._splash.destroy()
+            except Exception:
+                pass
+            self._splash = None
+        try:
+            self.deiconify()
+            self.lift()
+        except Exception:
+            pass
 
     def _setup_layout(self):
         # Main split: Left controls, Right visualization map
