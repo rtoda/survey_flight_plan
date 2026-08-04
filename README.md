@@ -11,7 +11,7 @@ from a transit waypoint to `IL01`, an 8 km lead-in on the line's own bearing, so
 is established on track before the first line begins.
 
 ## Features
-- Interactive Tkinter GUI to define survey boundary points and flight parameters
+- Interactive Tkinter GUI to define the survey area by either boundary vertices or a center point rectangle, plus flight parameters
 - Generates an optimized rectangular survey pattern based on swath width, overlap, heading, and margins
 - Exports two CSV formats: ForeFlight-friendly and Honeywell-friendly
 - Draws a scaled flight-path preview directly in the window (native Tk canvas — no browser engine needed)
@@ -19,6 +19,8 @@ is established on track before the first line begins.
 - Exports a KML/KMZ map layer and a ForeFlight content pack for getting the pattern onto an iPad
 - Saves and reloads a whole plan — boundary points and every parameter — as JSON
 - Renders a scannable QR of the ForeFlight route link right in the window (no Pillow needed)
+- Keeps **Generate Flight Plan & Update Map** and status feedback pinned above the tabs for laptop-height screens
+- Shows flight summary output in a dedicated **Summary** tab for easier access on smaller displays
 
 ## Layout
 - `airborne_survey_gui.py` — main GUI (scaled path preview drawn in-window; Folium map opens in a browser)
@@ -68,16 +70,29 @@ If you prefer `pipenv` or `venv`, create an environment and use the same `pip in
 
 ## Usage
 
-Enter boundary waypoints (minimum 3), set parameters, then click the generate button.
+Choose how to define the survey area, set parameters, then click the generate button.
 
 ```bash
 python airborne_survey_gui.py
 ```
 
-Boundary points and flight parameters can be saved and reloaded with **Save Plan…** /
-**Load Plan…**, above the generate button, so a set of points never has to be retyped. Every
+Boundary points/CenterPoint settings and flight parameters can be saved and reloaded with **Save Plan…** /
+**Load Plan…**, below the tabbed input area, so a set of points never has to be retyped. Every
 run also drops a `<AREA>_plan.json` next to its outputs, so any past plan folder can be
 reloaded as-is. The dialogs open on `plans/` by default.
+
+Use **Survey Area Defined By** on the **Flight & Export Settings** tab to pick one of two modes:
+
+- **Boundary GPS (Max 10)** — uses the polygon vertices from the Boundary GPS tab (minimum 3 rows).
+- **CenterPoint** — ignores Boundary GPS rows and builds the survey area from the CenterPoint tab:
+  Center Latitude, Center Longitude, Rectangle Width (km), and Rectangle Length (km).
+
+In **CenterPoint** mode, rectangle **length** is aligned with **Initial Heading (deg True)**,
+and width is perpendicular to that heading.
+
+The **Generate Flight Plan & Update Map** button and status line are pinned above the tabs,
+so they remain visible on laptop screens without scrolling. The detailed text output is on
+the **Summary** tab.
 
 **The app reopens whatever you were last working on**, rather than the built-in demo area —
 saving, loading, or generating into an area all make it the one that comes back next launch.
@@ -167,7 +182,7 @@ transit waypoints.
 Both coordinate grids have **Move** buttons on each row, so a new point can be slotted
 between two filled rows rather than only appended. Rows are read top to bottom. On the
 Waypoints tab that sets the order the legs are flown; on the Boundary GPS tab it reorders
-the polygon's vertices, which changes the shape of the survey area.
+the polygon's vertices, which changes the shape of the survey area when Boundary mode is active.
 
 Typed labels are coerced to what ForeFlight accepts — all capitals, at least 3 characters,
 at least one letter, no spaces — so `entry gate` becomes `ENTRY_GATE`. Anything that cannot
@@ -203,9 +218,9 @@ git-ignored — it is all regenerable, so nothing there is precious:
 
 - `<AREA>_waypoints_foreflight.csv` — waypoint list in ForeFlight's column order
 - `<AREA>_waypoints_honeywell.csv` — Honeywell FMS formatted CSV
-- `<AREA>_flight_path.html` — Folium map over real terrain, with the survey waypoints,
-  transit legs and boundary points on separate toggleable layers (open with the
-  button, or double-click the file)
+- `<AREA>_flight_path.html` — Folium map over real terrain, with survey waypoints,
+  transit legs, and (in Boundary mode) boundary points on separate toggleable layers
+  (open with the button, or double-click the file)
 - `<AREA>_survey.kml` / `.kmz` — survey pattern as a ForeFlight **map layer**: AirDrop or
   email it and the lines, buffer and named points display as a toggleable overlay without
   entering the waypoint database
@@ -253,7 +268,8 @@ including which claims are verified against ForeFlight's docs and which are not.
   front of every name, for telling two areas apart in the same database — but they spend
   characters from that same budget, so a prefix only fits while the line count is under 100.
   The exporter refuses rather than truncating if a name would overflow.
-- Provide at least 3 boundary points to define the survey polygon.
+- In Boundary mode, provide at least 3 boundary points to define the survey polygon.
+- In CenterPoint mode, provide center lat/lon plus positive width and length values.
 - The GUI runs one calculation at startup, so the preview and CSVs already exist before you
   click anything. The status line under the button stamps each run so repeat clicks are visible.
 - Tile-backed maps need real JavaScript; use **Open Map in Browser** for that view.
