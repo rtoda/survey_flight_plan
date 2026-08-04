@@ -733,6 +733,9 @@ class FlightPlannerGUI(tk.Tk):
         self.rectangular_box = tk.BooleanVar(value=True)
         self.repeats = tk.StringVar(value="1")
         self.retrace_lines = tk.BooleanVar(value=False)
+        # How the survey area is defined: either operator-entered boundary vertices, or a
+        # centre point with width/length aligned to Initial Heading.
+        self.survey_area_mode = tk.StringVar(value="Boundary GPS (Max 10)")
         # Strips the lead-in and the transit legs out of everything that gets drawn or
         # written, leaving the survey box alone. Deliberately NOT a different calculation:
         # see calculate_and_render for why the transit points still steer the geometry.
@@ -867,9 +870,22 @@ class FlightPlannerGUI(tk.Tk):
         right_frame = ttk.Frame(main_pane)
         main_pane.add(right_frame, weight=3)
 
+        # Keep run controls above the notebook so they stay visible on laptop-height
+        # displays while scrolling through inputs.
+        top_controls = ttk.Frame(left_frame)
+        top_controls.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        calculate_btn = ttk.Button(top_controls, text="Generate Flight Plan & Update Map",
+                       command=self.calculate_and_render)
+        calculate_btn.grid(row=0, column=0, sticky="ew")
+        # Visible confirmation that a click was handled, even when the inputs are unchanged.
+        self.status_var = tk.StringVar(value="Ready.")
+        ttk.Label(top_controls, textvariable=self.status_var, foreground="#0b6b3a",
+              wraplength=330, justify=tk.LEFT).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        top_controls.columnconfigure(0, weight=1)
+
         # --- TABBED NOTEBOOK FOR INPUTS ---
         notebook = ttk.Notebook(left_frame)
-        notebook.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
+        notebook.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
 
         # TAB 1: PARAMETERS & FILE EXPORTS
         param_tab = ttk.Frame(notebook, padding=10)
@@ -902,6 +918,27 @@ class FlightPlannerGUI(tk.Tk):
 
         # Flight settings fields
         ttk.Label(param_tab, text="Flight Parameters", font=("Helvetica", 10, "bold")).grid(row=4, column=0, sticky="w", pady=(0, 5))
+        area_mode_label = ttk.Label(param_tab, text="Survey Area Defined By:")
+        area_mode_label.grid(row=5, column=0, sticky="w", pady=5)
+        area_mode_box = ttk.Combobox(
+            param_tab,
+            width=22,
+            state="readonly",
+            values=("Boundary GPS (Max 10)", "CenterPoint"),
+            textvariable=self.survey_area_mode,
+        )
+        area_mode_box.grid(row=5, column=1, sticky="w", pady=5, padx=10)
+        area_mode_box.bind("<<ComboboxSelected>>", lambda _e: self.calculate_and_render())
+        ToolTip(area_mode_label,
+            "Choose how to define the survey area.\n\n"
+            "Boundary GPS (Max 10): use the polygon vertices on the Boundary GPS tab.\n\n"
+            "CenterPoint: use a centre latitude/longitude plus width and length from "
+            "the CenterPoint tab. Length aligns with Initial Heading.")
+        ToolTip(area_mode_box,
+            "Choose how to define the survey area.\n\n"
+            "Boundary GPS (Max 10): use the polygon vertices on the Boundary GPS tab.\n\n"
+            "CenterPoint: use a centre latitude/longitude plus width and length from "
+            "the CenterPoint tab. Length aligns with Initial Heading.")
         rect_check = ttk.Checkbutton(param_tab, text="Rectangular Box",
                                      variable=self.rectangular_box,
                                      command=self.calculate_and_render)
@@ -916,10 +953,10 @@ class FlightPlannerGUI(tk.Tk):
                 "Either way the perimeter margin still clears the boundary on all sides.")
 
         repeats_label = ttk.Label(param_tab, text="Repeats (fly box N times):")
-        repeats_label.grid(row=5, column=0, sticky="w", pady=5)
+        repeats_label.grid(row=6, column=0, sticky="w", pady=5)
         repeats_box = ttk.Combobox(param_tab, width=12, state="readonly",
                                    values=("1", "2", "3", "4"), textvariable=self.repeats)
-        repeats_box.grid(row=5, column=1, sticky="w", pady=5, padx=10)
+        repeats_box.grid(row=6, column=1, sticky="w", pady=5, padx=10)
         repeats_box.bind("<<ComboboxSelected>>", lambda _e: self.calculate_and_render())
         repeats_tip = ("How many times to fly the whole box.\n\n"
                        "Each cycle repeats the same lines in the same directions, so sensor "
@@ -933,16 +970,16 @@ class FlightPlannerGUI(tk.Tk):
         retrace_check = ttk.Checkbutton(param_tab, text="Retrace line",
                                         variable=self.retrace_lines,
                                         command=self.calculate_and_render)
-        retrace_check.grid(row=6, column=1, sticky="w", padx=10)
+        retrace_check.grid(row=7, column=1, sticky="w", padx=10)
         survey_only_check = ttk.Checkbutton(param_tab, text="Survey box only",
                                             variable=self.survey_only,
                                             command=self.calculate_and_render)
-        survey_only_check.grid(row=7, column=1, sticky="w", padx=10)
+        survey_only_check.grid(row=8, column=1, sticky="w", padx=10)
         # Column 0 of this row is free -- the two opposite filters sit side by side.
         skip_box_check = ttk.Checkbutton(param_tab, text="Skip survey box",
                                          variable=self.skip_box,
                                          command=self.calculate_and_render)
-        skip_box_check.grid(row=7, column=0, sticky="w")
+        skip_box_check.grid(row=8, column=0, sticky="w")
         ToolTip(skip_box_check,
                 "Drop the survey box entirely and fly only the transit waypoints and any "
                 "make-lines through them. The exact opposite of Survey box only.\n\n"
@@ -974,10 +1011,10 @@ class FlightPlannerGUI(tk.Tk):
                 "and the turn between rows stays short.")
 
         skip_label = ttk.Label(param_tab, text="Skip Edge Lines (each end):")
-        skip_label.grid(row=8, column=0, sticky="w", pady=5)
+        skip_label.grid(row=9, column=0, sticky="w", pady=5)
         skip_box = ttk.Combobox(param_tab, width=12, state="readonly",
                                 values=("0", "1", "2", "3"), textvariable=self.skip_edges)
-        skip_box.grid(row=8, column=1, sticky="w", pady=5, padx=10)
+        skip_box.grid(row=9, column=1, sticky="w", pady=5, padx=10)
         skip_box.bind("<<ComboboxSelected>>", lambda _e: self.calculate_and_render())
         skip_tip = ("Drop this many lines from EACH end of the box — 1 turns 7 lines into "
                     "5, removing the outermost pass on both sides.\n\n"
@@ -1012,10 +1049,10 @@ class FlightPlannerGUI(tk.Tk):
             ("Survey Flight Level:", "survey_altitude", "200"),
         ]
 
-        # Starts below the rows above: 4 rectangular box, 5 repeats, 6 retrace,
-        # 7 survey-box-only, 8 skip edge lines. Adding a control means moving this, or the
+        # Starts below the rows above: 4 rectangular box, 5 area mode, 6 repeats,
+        # 7 retrace, 8 survey-box-only, 9 skip edge lines. Adding a control means moving this, or the
         # first field lands in the same cell and Tk silently overlaps the two.
-        for i, (label_text, dict_key, default_val) in enumerate(fields, start=9):
+        for i, (label_text, dict_key, default_val) in enumerate(fields, start=10):
             ttk.Label(param_tab, text=label_text).grid(row=i, column=0, sticky="w", pady=5)
             entry = ttk.Entry(param_tab, width=15)
             entry.insert(0, default_val)
@@ -1058,7 +1095,29 @@ class FlightPlannerGUI(tk.Tk):
         clear_btn = ttk.Button(coords_tab, text="Clear All GPS Fields", command=self._clear_gps_fields)
         clear_btn.grid(row=12, column=1, columnspan=3, pady=5, sticky="ew")
 
-        # TAB 3: TRANSIT WAYPOINTS, BEFORE AND AFTER THE SURVEY BOX
+        # TAB 3: CENTER POINT + SIZE INPUT
+        center_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(center_tab, text="CenterPoint")
+
+        ttk.Label(center_tab, wraplength=520, justify=tk.LEFT, foreground="#555555",
+                  text="Define the survey area as a rectangle from one centre point. "
+                       "Length follows Initial Heading (deg True); width is perpendicular.").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        center_fields = [
+            ("Center Latitude:", "center_lat", "43.6475"),
+            ("Center Longitude:", "center_lon", "-116.1195"),
+            ("Rectangle Width (km):", "center_width_km", "12.0"),
+            ("Rectangle Length (km):", "center_length_km", "18.0"),
+        ]
+        for row, (label_text, key, default_val) in enumerate(center_fields, start=1):
+            ttk.Label(center_tab, text=label_text).grid(row=row, column=0, sticky="w", pady=5)
+            entry = ttk.Entry(center_tab, width=15)
+            entry.insert(0, default_val)
+            entry.grid(row=row, column=1, sticky="w", pady=5, padx=10)
+            self.inputs[key] = entry
+
+        # TAB 4: TRANSIT WAYPOINTS, BEFORE AND AFTER THE SURVEY BOX
         transit_tab = ttk.Frame(notebook, padding=10)
         notebook.add(transit_tab, text="Waypoints")
 
@@ -1177,11 +1236,24 @@ class FlightPlannerGUI(tk.Tk):
                    command=self._clear_transit_fields).grid(
             row=row_cursor, column=1, columnspan=4, pady=8, sticky="ew")
 
+        # TAB 5: SUMMARY OUTPUT
+        summary_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(summary_tab, text="Summary")
+        ttk.Label(summary_tab, text="Flight Path Summary Output",
+                  font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(0, 6))
+        self.stats_text = tk.Text(summary_tab, width=45, height=18,
+                                  wrap=tk.WORD, font=("Courier", 11))
+        self.stats_text.pack(fill=tk.BOTH, expand=True)
+        # Used for the over-limit banner. The panel is a wall of Courier, so a warning set
+        # in the same weight and colour as everything else reads as just another row.
+        self.stats_text.tag_configure("warn", foreground="#b00020",
+                                      font=("Courier", 11, "bold"))
+
         # --- AREA SAVE / LOAD ---
         # On the common pane rather than inside a tab: these act on the whole area
         # definition (points AND parameters), not just the coordinate grid.
         area_btns = ttk.Frame(left_frame)
-        area_btns.grid(row=1, column=0, columnspan=2, sticky="ew")
+        area_btns.grid(row=2, column=0, columnspan=2, sticky="ew")
         save_btn = ttk.Button(area_btns, text="Save Plan…", command=self._save_plan)
         save_btn.pack(side=tk.LEFT, expand=True, fill=tk.X)
         load_btn = ttk.Button(area_btns, text="Load Plan…", command=self._load_plan)
@@ -1197,26 +1269,8 @@ class FlightPlannerGUI(tk.Tk):
                 "then regenerate immediately.\n\n"
                 "A malformed file is rejected whole rather than half-applied.")
 
-        # --- RUN CONTROL BUTTON ---
-        calculate_btn = ttk.Button(left_frame, text="Generate Flight Plan & Update Map", command=self.calculate_and_render)
-        calculate_btn.grid(row=2, column=0, columnspan=2, pady=10, sticky="ew")
-
-        # Visible confirmation that a click was handled, even when the inputs are unchanged.
-        self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(left_frame, textvariable=self.status_var, foreground="#0b6b3a", wraplength=330,
-                  justify=tk.LEFT).grid(row=3, column=0, columnspan=2, sticky="w")
-
-        # --- FLIGHT STATISTICS WINDOW ---
-        ttk.Label(left_frame, text="Flight Path Summary Output", font=("Helvetica", 10, "bold")).grid(row=4, column=0, columnspan=2, pady=(10, 2), sticky="w")
-        self.stats_text = tk.Text(left_frame, width=45, height=15, wrap=tk.WORD, font=("Courier", 11))
-        self.stats_text.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=5)
-        # Used for the over-limit banner. The panel is a wall of Courier, so a warning set
-        # in the same weight and colour as everything else reads as just another row.
-        self.stats_text.tag_configure("warn", foreground="#b00020",
-                                      font=("Courier", 11, "bold"))
-
         left_frame.columnconfigure(0, weight=1)
-        left_frame.rowconfigure(5, weight=1)
+        left_frame.rowconfigure(1, weight=1)
 
         # --- FLIGHT PATH PREVIEW ---
         # Drawn on a native Tk canvas: the Folium map is Leaflet/JavaScript, which the
@@ -1793,6 +1847,7 @@ class FlightPlannerGUI(tk.Tk):
             # Stored as typed so a round-trip does not silently reformat "10.0" to "10".
             "parameters": {key: entry.get().strip() for key, entry in self.inputs.items()},
             "rectangular_box": self.rectangular_box.get(),
+            "survey_area_mode": self.survey_area_mode.get(),
             "repeats": self.repeats.get(),
             "retrace_lines": self.retrace_lines.get(),
             "survey_only": self.survey_only.get(),
@@ -1830,6 +1885,11 @@ class FlightPlannerGUI(tk.Tk):
 
         if "rectangular_box" in data:
             self.rectangular_box.set(bool(data["rectangular_box"]))
+        if "survey_area_mode" in data:
+            self.survey_area_mode.set(
+                data["survey_area_mode"]
+                if data["survey_area_mode"] in ("Boundary GPS (Max 10)", "CenterPoint")
+                else "Boundary GPS (Max 10)")
         if "retrace_lines" in data:
             self.retrace_lines.set(bool(data["retrace_lines"]))
         if "survey_only" in data:
@@ -1988,6 +2048,51 @@ class FlightPlannerGUI(tk.Tk):
                     raise ValueError(f"Invalid decimal format in Row {idx+1}.")
         return active_coords
 
+    def _get_centerpoint_coordinates(self, initial_heading_deg):
+        """Return four rectangle corners from centre point inputs.
+
+        Length runs along `initial_heading_deg` and width is perpendicular to it.
+        """
+        try:
+            center_lat = float(self.inputs["center_lat"].get().strip())
+            center_lon = float(self.inputs["center_lon"].get().strip())
+            width_km = float(self.inputs["center_width_km"].get().strip())
+            length_km = float(self.inputs["center_length_km"].get().strip())
+        except ValueError:
+            raise ValueError("CenterPoint fields must all be valid decimal numbers.")
+
+        if width_km <= 0.0 or length_km <= 0.0:
+            raise ValueError("CenterPoint width and length must both be greater than zero.")
+
+        crs_geo = CRS.from_epsg(4326)
+        utm_zone = int((center_lon + 180.0) // 6.0) + 1
+        epsg_code = 32600 + utm_zone if center_lat >= 0 else 32700 + utm_zone
+        crs_local = CRS.from_epsg(epsg_code)
+        to_m = Transformer.from_crs(crs_geo, crs_local, always_xy=True)
+        to_geo = Transformer.from_crs(crs_local, crs_geo, always_xy=True)
+
+        cx, cy = to_m.transform(center_lon, center_lat)
+        along = np.array([
+            math.sin(math.radians(initial_heading_deg)),
+            math.cos(math.radians(initial_heading_deg)),
+        ])
+        across = np.array([along[1], -along[0]])
+
+        half_len_m = (length_km * 1000.0) / 2.0
+        half_wid_m = (width_km * 1000.0) / 2.0
+        corners_xy = [
+            np.array([cx, cy]) + along * half_len_m + across * half_wid_m,
+            np.array([cx, cy]) + along * half_len_m - across * half_wid_m,
+            np.array([cx, cy]) - along * half_len_m - across * half_wid_m,
+            np.array([cx, cy]) - along * half_len_m + across * half_wid_m,
+        ]
+
+        corners = []
+        for idx, (x, y) in enumerate(corners_xy, start=1):
+            lon, lat = to_geo.transform(float(x), float(y))
+            corners.append((lat, lon, f"CP{idx:02d}"))
+        return corners
+
     def calculate_and_render(self):
         # 1. Harvest Export Configs and Validate Prefix
         area_name = self.area_name_entry.get().strip().replace(' ', '_')
@@ -2004,18 +2109,30 @@ class FlightPlannerGUI(tk.Tk):
                                  "Line ID Prefix must be empty, or 1-2 letters or digits.")
             return
 
-        # 2. Harvest & Validate Coordinates from GPS list
+        # 2. Parse flight settings used by both survey area modes.
         try:
-            survey_boundary = self._get_active_coordinates()
+            heading = float(self.inputs["initial_heading_deg"].get())
+        except ValueError:
+            messagebox.showerror("Input Error", "Ensure all Flight settings are valid numbers.")
+            return
+
+        # 3. Build the survey boundary from the selected mode.
+        try:
+            if self.survey_area_mode.get() == "CenterPoint":
+                survey_boundary = self._get_centerpoint_coordinates(heading)
+            else:
+                survey_boundary = self._get_active_coordinates()
         except ValueError as err:
             messagebox.showerror("Input Error", str(err))
             return
 
         if len(survey_boundary) < 3:
-            messagebox.showerror("Input Error", "At least 3 valid GPS coordinate rows must be filled to create a closed survey boundary.")
+            messagebox.showerror(
+                "Input Error",
+                "At least 3 valid GPS coordinate rows must be filled to create a closed survey boundary.")
             return
 
-        # 3. Re-calculate projection parameters dynamically based on current centroid
+        # 4. Re-calculate projection parameters dynamically based on current centroid
         center_lat = np.mean([lat for lat, lon, *_ in survey_boundary])
         center_lon = np.mean([lon for lat, lon, *_ in survey_boundary])
         
@@ -2030,13 +2147,12 @@ class FlightPlannerGUI(tk.Tk):
         def xy_to_latlon(xy_points):
             return [(to_geo.transform(x, y)[1], to_geo.transform(x, y)[0]) for x, y in xy_points]
 
-        # 4. Parse Flight Settings Safely
+        # 5. Parse Flight Settings Safely
         try:
             gs = float(self.inputs["groundspeed_kt"].get())
             swath = float(self.inputs["swath_width_km"].get())
             overlap = float(self.inputs["swath_overlap"].get())
             margin = float(self.inputs["perimeter_margin_km"].get())
-            heading = float(self.inputs["initial_heading_deg"].get())
             lat_off = float(self.inputs["lat_offset"].get())
             lon_off = float(self.inputs["lon_offset"].get())
             lead_in_km = max(0.0, float(self.inputs["lead_in_km"].get()))
@@ -2058,7 +2174,7 @@ class FlightPlannerGUI(tk.Tk):
             skip_edges = 0
         self.skip_edges.set(str(skip_edges))
 
-        # 5. Transit waypoints first: the pattern needs to know which side the aircraft
+        # 6. Transit waypoints first: the pattern needs to know which side the aircraft
         #    arrives from before it can pick which corner of the box to start at.
         try:
             before = self._get_transit_points("before", waypoint_prefix)
@@ -2137,7 +2253,7 @@ class FlightPlannerGUI(tk.Tk):
                 messagebox.showerror("Execution Error", str(e))
                 return
 
-        # 6. Every artefact for this plan lands in plans/<name>/, and that folder carries
+        # 7. Every artefact for this plan lands in plans/<name>/, and that folder carries
         #    the plan itself so it can be reloaded without retyping the points.
         out_dir = os.path.join(os.getcwd(), PLANS_DIR, area_name)
         try:
@@ -2169,7 +2285,7 @@ class FlightPlannerGUI(tk.Tk):
             messagebox.showerror("Waypoint Naming Error", str(err))
             return
 
-        # 7. Parse and Print Diagnostics Panel
+        # 8. Parse and Print Diagnostics Panel
         self.stats_text.delete("1.0", tk.END)
         segment_summaries, dist_m, dist_nm, time_min = summarize_segment_travel(survey_pattern, gs)
 
@@ -2177,12 +2293,14 @@ class FlightPlannerGUI(tk.Tk):
         manifest_stamp = time.strftime('%Y%m%dT%H:%M:%SZ', time.gmtime())
         meta = {'lines': len(segments), 'heading': heading,
                 'dist_nm': dist_nm, 'time_min': time_min}
+        boundary_points_for_export = (
+            survey_boundary if self.survey_area_mode.get() != "CenterPoint" else [])
 
         kml_text = build_survey_kml(
             area_name,
             xy_to_latlon(list(survey_poly.exterior.coords)) if survey_poly else [],
             xy_to_latlon(list(survey_pattern.coords)),
-            waypoints, survey_boundary, meta, generated_utc,
+            waypoints, boundary_points_for_export, meta, generated_utc,
         )
         kml_file, kmz_file, pack_file = self._export_foreflight_bundle(
             area_name, waypoint_prefix, kml_text, waypoints, generated_utc, manifest_stamp, out_dir)
@@ -2223,6 +2341,7 @@ class FlightPlannerGUI(tk.Tk):
             f"Prefix Configured: {waypoint_prefix}",
             f"Generated (UTC): {generated_utc}",
             f"Output Folder: {PLANS_DIR}{os.sep}{area_name}{os.sep}",
+            f"Survey Area Mode: {self.survey_area_mode.get()}",
             f"Active Vertices parsed: {len(survey_boundary)}",
             f"Pattern: {'Rectangular box' if self.rectangular_box.get() else 'Clipped to target outline'}"
             if segments else "Pattern: none — survey box skipped",
@@ -2326,11 +2445,12 @@ class FlightPlannerGUI(tk.Tk):
                 f"   Widen the swath, cut repeats, or turn retrace off.\n\n",
                 "warn")
 
-        # 8. Refresh the in-window preview (UTM metres, matching the geometry engine)
+        # 9. Refresh the in-window preview (UTM metres, matching the geometry engine)
         self._preview = {
             'rect': list(survey_poly.exterior.coords) if survey_poly else [],
             'track': list(survey_pattern.coords),
-            'marks': [(*to_m.transform(lon, lat), label) for lat, lon, label in survey_boundary],
+            'marks': [] if self.survey_area_mode.get() == "CenterPoint"
+            else [(*to_m.transform(lon, lat), label) for lat, lon, label in survey_boundary],
             # Survey line ends only; transit points get their own grey markers below so the
             # two are never confused in the air.
             'waypoints': [(*to_m.transform(lon, lat), name) for name, lat, lon in survey_waypoints],
@@ -2351,7 +2471,7 @@ class FlightPlannerGUI(tk.Tk):
         }
         self._draw_preview()
 
-        # 9. The Folium map is the slowest thing in a run: folium alone is ~1.1 s of
+        # 10. The Folium map is the slowest thing in a run: folium alone is ~1.1 s of
         # import because it drags in pandas, and the map is only ever read through the
         # browser button. Import and build are both deferred to the idle queue so the
         # window paints first. Anything needing the file on disk calls _flush_map().
@@ -2374,16 +2494,17 @@ class FlightPlannerGUI(tk.Tk):
             folium.PolyLine(pattern_latlon, color='#d81b1b', weight=4, opacity=0.9,
                             dash_array='5, 6', tooltip='Survey flight track').add_to(survey_map)
 
-            boundary_layer = folium.FeatureGroup(name='Boundary points')
-            for point in survey_boundary:
-                lat, lon, wp_name = point[0], point[1], point[2]
-                folium.Marker(
-                    location=[lat, lon],
-                    popup=f"{wp_name}: ({lat:.5f}, {lon:.5f})",
-                    tooltip=wp_name,
-                    icon=folium.Icon(color='purple', icon='info-sign')
-                ).add_to(boundary_layer)
-            boundary_layer.add_to(survey_map)
+            if self.survey_area_mode.get() != "CenterPoint":
+                boundary_layer = folium.FeatureGroup(name='Boundary points')
+                for point in survey_boundary:
+                    lat, lon, wp_name = point[0], point[1], point[2]
+                    folium.Marker(
+                        location=[lat, lon],
+                        popup=f"{wp_name}: ({lat:.5f}, {lon:.5f})",
+                        tooltip=wp_name,
+                        icon=folium.Icon(color='purple', icon='info-sign')
+                    ).add_to(boundary_layer)
+                boundary_layer.add_to(survey_map)
 
             # Labels ride along permanently while there are few enough to read; past that they
             # would be an unreadable mat, so they fall back to hover.
@@ -2421,7 +2542,7 @@ class FlightPlannerGUI(tk.Tk):
 
             folium.LayerControl(collapsed=False).add_to(survey_map)
 
-            # 10. Save the interactive map for the browser button (Leaflet needs a real browser)
+            # 11. Save the interactive map for the browser button (Leaflet needs a real browser)
             survey_map.save(self._map_path)
 
         # Drop the previous run's file before queuing this one. Everything else here is
