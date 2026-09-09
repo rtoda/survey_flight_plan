@@ -19,6 +19,10 @@ that file).
 - `model_beam_eigenfrequency.java` — COMSOL Java API script that builds the
   same model programmatically (`comsol compile` / run through the COMSOL
   Desktop "Compile Java File" feature).
+- `model_beam_eigenfrequency.py` — the same script ported to Python, via the
+  third-party [`mph`](https://pypi.org/project/mph/) package (`pip install
+  mph`), which drives a local COMSOL install over the same underlying Java
+  API. Run with `python model_beam_eigenfrequency.py`.
 - `analytical_estimate.py` — a dependency-free Python sanity check, runnable
   right now, that computes the axial mass-spring frequency and related
   quantities in closed form.
