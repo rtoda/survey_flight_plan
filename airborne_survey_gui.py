@@ -846,7 +846,7 @@ def foreflight_waypoint_name(raw, fallback):
     return fallback
 
 
-def build_foreflight_route(waypoints, origin, destination, flight_level,
+def build_foreflight_route(waypoints, origin, destination, altitude_ft,
                            before=(), after=(), cruise_kt=None):
     """ForeFlight route text and its foreflightmobile:// URL.
 
@@ -858,7 +858,11 @@ def build_foreflight_route(waypoints, origin, destination, flight_level,
     per-waypoint `/F<level>` form exists to mark a *change* partway along a route; a survey
     flies one level throughout, so repeating it cost 5 characters on every point -- 400 on an
     80-waypoint plan -- and bought nothing. Trailing cruise altitude is documented as plain
-    feet, so FL200 goes out as 20000; the F-prefixed form is only for mid-route changes.
+    feet, so the Survey MSL field goes out as typed (20000); the F-prefixed form is only for
+    mid-route changes.
+
+    Origin and destination are optional. A blank one is left out, so the route starts or
+    ends at a waypoint instead of `APT@<origin>` / `<destination>`.
 
     Without a speed token ForeFlight loads the route but complains "Cruise TAS required for
     performance calculations", so the groundspeed is sent as the cruise speed. That is an
@@ -880,7 +884,11 @@ def build_foreflight_route(waypoints, origin, destination, flight_level,
     parts = (transit_tokens(before)
              + [coord_token(lat, lon) for _name, lat, lon in waypoints]
              + transit_tokens(after))
-    route_text = f"APT@{origin}+" + "+".join(parts) + f"+{destination}"
+    if origin:
+        parts.insert(0, f"APT@{origin}")
+    if destination:
+        parts.append(destination)
+    route_text = "+".join(parts)
 
     # Both are best-effort: a junk entry drops its token rather than emitting something
     # ForeFlight would choke on. The route itself is still perfectly usable without them.
@@ -890,11 +898,28 @@ def build_foreflight_route(waypoints, origin, destination, flight_level,
     except (TypeError, ValueError):
         pass
     try:
-        route_text += f"+{int(float(flight_level)) * 100}"
+        if float(altitude_ft) > 0:
+            route_text += f"+{int(round(float(altitude_ft)))}"
     except (TypeError, ValueError):
         pass
 
     return route_text, f"foreflightmobile://maps/search?q={route_text}"
+
+
+def upgrade_parameters(params):
+    """Bring a saved plan's parameters up to date, in place, and return them.
+
+    Plans saved before the change hold the cruise altitude as a flight level under
+    "survey_altitude" (200 = FL200); it is now feet MSL under "survey_msl_ft". Converting
+    rather than copying keeps an old "200" from silently becoming 200 ft.
+    """
+    old = params.pop("survey_altitude", None)
+    if old is not None and "survey_msl_ft" not in params:
+        try:
+            params["survey_msl_ft"] = str(int(round(float(old) * 100)))
+        except (TypeError, ValueError):
+            pass
+    return params
 
 
 # --- AIRPORTS ---
@@ -940,6 +965,8 @@ def airport_point(code, role):
     waypoint, so the drawing and distance code needs nothing special for it.
     """
     code = (code or '').strip().upper()
+    if not code:
+        return None, ""          # left blank: optional, so nothing to place or report
     found = load_airports().get(code)
     if found is None:
         why = ("not in the airport table" if load_airports()
@@ -1517,7 +1544,7 @@ class FlightPlannerGUI(tk.Tk):
             ("Transit Groundspeed (knots):", "transit_groundspeed_kt", "200"),
             # Sets the turn radius used between survey lines: 25 degrees is the usual
             # autopilot bank limit. 0 goes back to counting turns as straight legs.
-            ("Bank Angle (deg):", "bank_angle_deg", "25"),
+            ("Max Bank Angle (deg):", "bank_angle_deg", "25"),
             ("Swath Width (km):", "swath_width_km", "10.0"),
             ("Swath Overlap (0.0-1.0):", "swath_overlap", "0.1"),
             ("Perimeter Margin (km):", "perimeter_margin_km", "5.0"),
@@ -1532,9 +1559,10 @@ class FlightPlannerGUI(tk.Tk):
             ("Lead-in Distance (km):", "lead_in_km", "0.0"),
             # Route endpoints and cruise level for the ForeFlight route link and its QR
             # code. Not used by the survey geometry at all.
-            ("Origin Airport:", "origin_airport", "KBOI"),
-            ("Destination Airport:", "destination_airport", "KBOI"),
-            ("Survey Flight Level:", "survey_altitude", "200"),
+            # Both optional: blank leaves that end off the route link and the transit time.
+            ("Origin Airport (optional):", "origin_airport", "KBOI"),
+            ("Destination Airport (optional):", "destination_airport", "KBOI"),
+            ("Survey MSL (ft):", "survey_msl_ft", "20000"),
         ]
 
         # Starts below the rows above: 4 rectangular box, 5 area mode, 6 repeats,
@@ -1794,8 +1822,8 @@ class FlightPlannerGUI(tk.Tk):
                 "route link.\n\n"
                 "Scanning it on the iPad opens ForeFlight with the whole survey as a "
                 "route, origin and destination included — no file transfer needed.\n\n"
-                "Route endpoints and the flight level come from the Origin Airport, "
-                "Destination Airport and Survey Flight Level fields.")
+                "Route endpoints and the cruise altitude come from the Origin Airport, "
+                "Destination Airport and Survey MSL fields.")
 
         foreflight_button = ttk.Button(preview_header, text="Open in ForeFlight",
                                        command=self._open_in_foreflight)
@@ -2441,7 +2469,7 @@ class FlightPlannerGUI(tk.Tk):
             raise ValueError(f"File has {len(boundary)} boundary points; "
                              f"only {len(self.coord_rows)} rows are available.")
 
-        for key, value in (data.get("parameters") or {}).items():
+        for key, value in upgrade_parameters(dict(data.get("parameters") or {})).items():
             if key in self.inputs:
                 self.inputs[key].delete(0, tk.END)
                 self.inputs[key].insert(0, str(value))
@@ -2745,7 +2773,7 @@ class FlightPlannerGUI(tk.Tk):
         if not 0.0 <= bank_deg <= 60.0:
             messagebox.showerror(
                 "Input Error",
-                "Bank Angle must be between 0 and 60 degrees. 0 ignores the turn radius.")
+                "Max Bank Angle must be between 0 and 60 degrees. 0 ignores the turn radius.")
             return
         turn_radius = turn_radius_m(gs, bank_deg)
 
@@ -2792,8 +2820,8 @@ class FlightPlannerGUI(tk.Tk):
 
         mapped_before = [p for p in before if p["lat"] is not None]
         mapped_after = [p for p in after if p["lat"] is not None]
-        origin_code = self.inputs["origin_airport"].get().strip().upper() or "KBOI"
-        destination_code = self.inputs["destination_airport"].get().strip().upper() or "KBOI"
+        origin_code = self.inputs["origin_airport"].get().strip().upper()
+        destination_code = self.inputs["destination_airport"].get().strip().upper()
         origin_pt, origin_note = airport_point(origin_code, "Origin")
         destination_pt, destination_note = airport_point(destination_code, "Destination")
         # The box is entered from whatever the aircraft arrives from: the last placed transit
@@ -2964,7 +2992,7 @@ class FlightPlannerGUI(tk.Tk):
             survey_waypoints,
             origin_code,
             destination_code,
-            self.inputs["survey_altitude"].get().strip() or "200",
+            self.inputs["survey_msl_ft"].get().strip(),
             before=before, after=after,
             # The route covers the whole flight, most of it in transit, so ForeFlight gets
             # the transit speed as its cruise speed.

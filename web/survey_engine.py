@@ -47,7 +47,7 @@ DEFAULT_PARAMETERS = {
     "groundspeed_kt": "200", "transit_groundspeed_kt": "200", "bank_angle_deg": "25", "swath_width_km": "10.0", "swath_overlap": "0.1",
     "perimeter_margin_km": "5.0", "initial_heading_deg": "0", "lat_offset": "0.0",
     "lon_offset": "0.0", "lead_in_km": "0.0", "origin_airport": "KBOI",
-    "destination_airport": "KBOI", "survey_altitude": "200", "center_lat": "43.6475",
+    "destination_airport": "KBOI", "survey_msl_ft": "20000", "center_lat": "43.6475",
     "center_lon": "-116.1195", "center_width_km": "12.0", "center_length_km": "18.0",
     "make_line_km": "20.0",
 }
@@ -837,7 +837,7 @@ def foreflight_waypoint_name(raw, fallback):
     return fallback
 
 
-def build_foreflight_route(waypoints, origin, destination, flight_level,
+def build_foreflight_route(waypoints, origin, destination, altitude_ft,
                            before=(), after=(), cruise_kt=None):
     """ForeFlight route text and its foreflightmobile:// URL.
 
@@ -849,7 +849,11 @@ def build_foreflight_route(waypoints, origin, destination, flight_level,
     per-waypoint `/F<level>` form exists to mark a *change* partway along a route; a survey
     flies one level throughout, so repeating it cost 5 characters on every point -- 400 on an
     80-waypoint plan -- and bought nothing. Trailing cruise altitude is documented as plain
-    feet, so FL200 goes out as 20000; the F-prefixed form is only for mid-route changes.
+    feet, so the Survey MSL field goes out as typed (20000); the F-prefixed form is only for
+    mid-route changes.
+
+    Origin and destination are optional. A blank one is left out, so the route starts or
+    ends at a waypoint instead of `APT@<origin>` / `<destination>`.
 
     Without a speed token ForeFlight loads the route but complains "Cruise TAS required for
     performance calculations", so the groundspeed is sent as the cruise speed. That is an
@@ -871,7 +875,11 @@ def build_foreflight_route(waypoints, origin, destination, flight_level,
     parts = (transit_tokens(before)
              + [coord_token(lat, lon) for _name, lat, lon in waypoints]
              + transit_tokens(after))
-    route_text = f"APT@{origin}+" + "+".join(parts) + f"+{destination}"
+    if origin:
+        parts.insert(0, f"APT@{origin}")
+    if destination:
+        parts.append(destination)
+    route_text = "+".join(parts)
 
     # Both are best-effort: a junk entry drops its token rather than emitting something
     # ForeFlight would choke on. The route itself is still perfectly usable without them.
@@ -881,11 +889,28 @@ def build_foreflight_route(waypoints, origin, destination, flight_level,
     except (TypeError, ValueError):
         pass
     try:
-        route_text += f"+{int(float(flight_level)) * 100}"
+        if float(altitude_ft) > 0:
+            route_text += f"+{int(round(float(altitude_ft)))}"
     except (TypeError, ValueError):
         pass
 
     return route_text, f"foreflightmobile://maps/search?q={route_text}"
+
+
+def upgrade_parameters(params):
+    """Bring a saved plan's parameters up to date, in place, and return them.
+
+    Plans saved before the change hold the cruise altitude as a flight level under
+    "survey_altitude" (200 = FL200); it is now feet MSL under "survey_msl_ft". Converting
+    rather than copying keeps an old "200" from silently becoming 200 ft.
+    """
+    old = params.pop("survey_altitude", None)
+    if old is not None and "survey_msl_ft" not in params:
+        try:
+            params["survey_msl_ft"] = str(int(round(float(old) * 100)))
+        except (TypeError, ValueError):
+            pass
+    return params
 
 
 # --- AIRPORTS ---
@@ -931,6 +956,8 @@ def airport_point(code, role):
     waypoint, so the drawing and distance code needs nothing special for it.
     """
     code = (code or '').strip().upper()
+    if not code:
+        return None, ""          # left blank: optional, so nothing to place or report
     found = load_airports().get(code)
     if found is None:
         why = ("not in the airport table" if load_airports()
@@ -1231,7 +1258,8 @@ def generate(plan):
                         f"Unsupported plan schema {schema!r}; expected {PLAN_SCHEMA!r}.")
 
     params = dict(DEFAULT_PARAMETERS)
-    params.update({k: _text(v) for k, v in (plan.get("parameters") or {}).items()})
+    params.update(upgrade_parameters(
+        {k: _text(v) for k, v in (plan.get("parameters") or {}).items()}))
     mode = plan.get("survey_area_mode")
     mode = mode if mode in AREA_MODES else AREA_MODES[0]
     bearing_mode = plan.get("make_line_bearing")
@@ -1302,7 +1330,7 @@ def generate(plan):
         raise PlanError("Input Error", "Ensure all Flight settings are valid numbers.")
     if not 0.0 <= bank_deg <= 60.0:
         raise PlanError("Input Error",
-                        "Bank Angle must be between 0 and 60 degrees. 0 ignores the turn radius.")
+                        "Max Bank Angle must be between 0 and 60 degrees. 0 ignores the turn radius.")
     turn_radius = turn_radius_m(gs, bank_deg)
     try:
         repeats = min(4, max(1, int(float(plan.get("repeats", 1)))))
@@ -1333,8 +1361,8 @@ def generate(plan):
 
     mapped_before = [p for p in before if p["lat"] is not None]
     mapped_after = [p for p in after if p["lat"] is not None]
-    origin_code = params["origin_airport"].upper() or "KBOI"
-    destination_code = params["destination_airport"].upper() or "KBOI"
+    origin_code = params["origin_airport"].upper()
+    destination_code = params["destination_airport"].upper()
     origin_pt, origin_note = airport_point(origin_code, "Origin")
     destination_pt, destination_note = airport_point(destination_code, "Destination")
     # The box is entered from whatever the aircraft arrives from: the last placed transit
@@ -1480,7 +1508,7 @@ def generate(plan):
         survey_waypoints,
         origin_code,
         destination_code,
-        params["survey_altitude"] or "200",
+        params["survey_msl_ft"],
         before=before, after=after, cruise_kt=params["transit_groundspeed_kt"])
 
     saved_plan = dict(plan)

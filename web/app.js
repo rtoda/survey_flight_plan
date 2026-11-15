@@ -46,8 +46,8 @@ const FIELDS = {
       tip: "Speed flown in the pattern: the lead-in, the survey lines and the turns between them. Sets the in-pattern time and, with the bank angle, the turn radius." },
     { kind: "param", key: "transit_groundspeed_kt", label: "Transit Groundspeed (knots)", value: "200",
       tip: "Speed flown to and from the pattern: the transit waypoints and the legs from the origin airport and to the destination. Sets the transit time, and is sent to ForeFlight as the cruise speed." },
-    { kind: "param", key: "bank_angle_deg", label: "Bank Angle (deg)", value: "25",
-      tip: "Sets the turn radius between survey lines, together with the groundspeed. 25 is the usual autopilot bank limit. Distance, time and the drawn track include the turns; the waypoint files do not change. 0 counts turns as straight legs." },
+    { kind: "param", key: "bank_angle_deg", label: "Max Bank Angle (deg)", value: "25",
+      tip: "The steepest bank the turns may use. Sets the turn radius between survey lines, together with the groundspeed. 25 is the usual autopilot bank limit. Distance, time and the drawn track include the turns; the waypoint files do not change. 0 counts turns as straight legs." },
     { kind: "param", key: "swath_width_km", label: "Swath Width (km)", value: "10.0",
       tip: "Width of ground the sensor covers on one pass." },
     { kind: "param", key: "swath_overlap", label: "Swath Overlap (0.0-1.0)", value: "0.1",
@@ -64,12 +64,12 @@ const FIELDS = {
       tip: "Adds a waypoint this far back from the first line's start, on the line's own bearing, so the aircraft is established on track before the line begins. 0 turns it off." },
   ],
   "route-fields": [
-    { kind: "param", key: "origin_airport", label: "Origin Airport", value: "KBOI",
-      tip: "ICAO code, e.g. KLAX. Starts the ForeFlight route link, and when the code is in the built-in airport table it is drawn, counted in the flight distance and time, and used to pick the corner the box is entered from. Never added to the waypoint files." },
-    { kind: "param", key: "destination_airport", label: "Destination Airport", value: "KBOI",
-      tip: "ICAO code, e.g. KSLC. Ends the ForeFlight route link, and when the code is in the built-in airport table it is drawn and counted like the origin. Never added to the waypoint files." },
-    { kind: "param", key: "survey_altitude", label: "Survey Flight Level", value: "200",
-      tip: "200 means FL200, 20,000 ft. Sent to ForeFlight as the cruise altitude." },
+    { kind: "param", key: "origin_airport", label: "Origin Airport (optional)", value: "KBOI",
+      tip: "ICAO code, e.g. KLAX, or leave blank. Starts the ForeFlight route link, and when the code is in the built-in airport table it is drawn, counted in the flight distance and time, and used to pick the corner the box is entered from. Never added to the waypoint files." },
+    { kind: "param", key: "destination_airport", label: "Destination Airport (optional)", value: "KBOI",
+      tip: "ICAO code, e.g. KSLC, or leave blank. Ends the ForeFlight route link, and when the code is in the built-in airport table it is drawn and counted like the origin. Never added to the waypoint files." },
+    { kind: "param", key: "survey_msl_ft", label: "Survey MSL (ft)", value: "20000",
+      tip: "Survey altitude in feet above mean sea level, e.g. 20000. Sent to ForeFlight as the cruise altitude." },
   ],
   "center-fields": [
     { kind: "param", key: "center_lat", label: "Center Latitude", value: "43.6475", tip: "Decimal degrees; south is negative." },
@@ -240,6 +240,14 @@ function applyPlan(data) {
       throw new Error(`File has ${transit[group].length} '${group}' waypoints; only ${TRANSIT_ROWS} rows are available.`);
     }
   }
+  // Plans saved before Survey MSL held a flight level (200 = FL200) under survey_altitude.
+  const params = { ...(data.parameters || {}) };
+  if (params.survey_altitude != null && params.survey_msl_ft == null) {
+    const level = parseFloat(params.survey_altitude);
+    if (Number.isFinite(level)) params.survey_msl_ft = String(Math.round(level * 100));
+  }
+  delete params.survey_altitude;
+  data = { ...data, parameters: params };
   const base = defaultPlan();
   for (const { field, element } of Object.values(controls)) {
     let value = field.kind === "param" ? (data.parameters || {})[field.key] : data[field.key];

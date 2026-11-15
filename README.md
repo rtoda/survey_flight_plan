@@ -170,7 +170,7 @@ box**, the whole route of transit waypoints and make-lines counts as the pattern
 airport legs count as transit. Plans saved before the split load with the transit speed at its
 default of 200 kt, so check it.
 
-**Bank Angle** (default 25°, the usual autopilot limit) sets the turn radius between survey
+**Max Bank Angle** (default 25°, the usual autopilot limit) sets the turn radius between survey
 lines, together with the survey groundspeed: 2.3 km at 200 kt. Distance, time and the drawn track then
 follow the turns the aircraft has to fly rather than straight legs from one line end to the
 next, and the summary lists each turn. Set 0 to count turns as straight legs, as earlier
@@ -221,7 +221,9 @@ an identifier (`BOI`, `DANDD`) **or** a lat/lon pair:
 - A **lat/lon** row is written to both CSVs bracketing the survey waypoints, drawn on the
   preview as a grey dashed leg, and included in the transit distance.
 
-**Origin Airport** and **Destination Airport** take ICAO codes (`KLAX`, `KSLC`). Besides
+**Origin Airport** and **Destination Airport** are optional and take ICAO codes (`KLAX`,
+`KSLC`). Left blank, that end is simply left off: the route link starts or ends at a waypoint,
+and no airport leg is drawn or counted. Besides
 starting and ending the ForeFlight route link, a code found in the built-in airport table
 (`web/airports.csv`, about 10,000 airports from the public-domain OurAirports data) is placed
 on the map: drawn at the ends of the transit legs, counted in **Transit Time** and **Total
@@ -354,8 +356,10 @@ Use **Show Export Files** in the app to open the folder for AirDropping.
 
 **Show QR** swaps the right pane for a QR code of that route link. Scanning it with the iPad
 camera opens the whole survey in ForeFlight as a route, origin and destination included, with
-no file transfer at all. The endpoints and cruise level come from the **Origin Airport**,
-**Destination Airport** and **Survey Flight Level** fields (200 means FL200, 20,000 ft).
+no file transfer at all. The endpoints and cruise altitude come from the **Origin Airport**,
+**Destination Airport** and **Survey MSL (ft)** fields (feet above mean sea level, e.g.
+20000). Plans saved with the older Survey Flight Level field are converted on load (200 →
+20000).
 Drawn directly on the canvas, so Pillow is not required.
 
 **Open in ForeFlight** sends the same route link straight to ForeFlight on the device the

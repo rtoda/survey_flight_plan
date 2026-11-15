@@ -44,7 +44,7 @@ def plan(name, params=None, **flags):
             "groundspeed_kt": "200", "transit_groundspeed_kt": "200", "bank_angle_deg": "25", "swath_width_km": "4.0", "swath_overlap": "0.1",
             "perimeter_margin_km": "5.0", "initial_heading_deg": "0", "lat_offset": "0.0",
             "lon_offset": "0.0", "lead_in_km": "0.0", "origin_airport": "KBOI",
-            "destination_airport": "KBOI", "survey_altitude": "200", "center_lat": "43.6475",
+            "destination_airport": "KBOI", "survey_msl_ft": "20000", "center_lat": "43.6475",
             "center_lon": "-116.1195", "center_width_km": "12.0", "center_length_km": "18.0",
             "make_line_km": "20.0",
         },
