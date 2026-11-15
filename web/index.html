@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Airborne Survey Flight Planner</title>
+<meta name="description" content="Generate airborne survey flight patterns and export waypoints for ForeFlight and a Honeywell FMS.">
+<meta name="referrer" content="no-referrer">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Airborne Survey Flight Planner</h1>
+  <div class="actions">
+    <button id="generate" class="primary" disabled>Generate Flight Plan</button>
+    <button id="save-plan" disabled>Save Plan…</button>
+    <button id="load-plan">Load Plan…</button>
+    <button id="reset-plan" title="Discard everything typed and go back to the demo area.">Reset</button>
+    <input id="plan-file" type="file" accept=".json,application/json" hidden>
+  </div>
+  <p id="status" role="status">Loading…</p>
+  <div id="error" role="alert" hidden></div>
+  <div id="warning" role="alert" hidden></div>
+</header>
+
+<main>
+  <section id="inputs">
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="settings" aria-selected="true">Flight &amp; Export</button>
+      <button role="tab" data-tab="boundary">Boundary GPS</button>
+      <button role="tab" data-tab="center">CenterPoint</button>
+      <button role="tab" data-tab="waypoints">Waypoints</button>
+      <button role="tab" data-tab="summary">Summary</button>
+    </nav>
+
+    <div class="tab" id="tab-settings">
+      <h2>Export</h2>
+      <div class="fields" id="export-fields"></div>
+      <h2>Survey area</h2>
+      <div class="fields" id="area-fields"></div>
+      <h2>Flight parameters</h2>
+      <div class="fields" id="flight-fields"></div>
+      <h2>ForeFlight route link</h2>
+      <div class="fields" id="route-fields"></div>
+    </div>
+
+    <div class="tab" id="tab-boundary" hidden>
+      <p class="hint">The corners of the target area, up to 10, in decimal degrees (west and south are negative). At least 3 rows. Used when <b>Survey Area Defined By</b> is set to Boundary GPS.</p>
+      <table class="grid" id="boundary-table">
+        <thead><tr><th>#</th><th>Latitude</th><th>Longitude</th><th>Label</th><th>Move</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <button id="clear-boundary">Clear all rows</button>
+    </div>
+
+    <div class="tab" id="tab-center" hidden>
+      <p class="hint">A rectangle around one point. Length follows Initial Heading (deg True); width is perpendicular. Used when <b>Survey Area Defined By</b> is set to CenterPoint.</p>
+      <div class="fields" id="center-fields"></div>
+    </div>
+
+    <div class="tab" id="tab-waypoints" hidden>
+      <p class="hint">Legs flown before reaching the survey box and after leaving it. Each row takes <b>either</b> an identifier (KBOI, BOI, DANDD) <b>or</b> a latitude/longitude pair. Tick <b>Line</b> to fly a short survey line through that waypoint.</p>
+      <h2>Before the survey box</h2>
+      <table class="grid" id="before-table">
+        <thead><tr><th>#</th><th>Ident</th><th>Latitude</th><th>Longitude</th><th>Label</th><th>Line</th><th>Move</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h2>After the survey box</h2>
+      <table class="grid" id="after-table">
+        <thead><tr><th>#</th><th>Ident</th><th>Latitude</th><th>Longitude</th><th>Label</th><th>Line</th><th>Move</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="fields" id="line-fields"></div>
+      <button id="clear-transit">Clear all waypoints</button>
+    </div>
+
+    <div class="tab" id="tab-summary" hidden>
+      <pre id="summary">Nothing generated yet.</pre>
+    </div>
+  </section>
+
+  <section id="outputs">
+    <div class="toolbar">
+      <strong id="plan-title">Flight path preview</strong>
+      <span class="spacer"></span>
+      <label><input type="checkbox" id="show-labels" checked> Labels</label>
+      <label title="Off by default. A basemap asks Esri's servers for map tiles of the survey area, which tells them where it is.">Basemap
+        <select id="basemap">
+          <option value="none">None (private)</option>
+          <option value="topo">Esri topo</option>
+          <option value="satellite">Esri satellite</option>
+        </select>
+      </label>
+      <button id="toggle-qr" disabled>Show QR</button>
+    </div>
+    <div id="view">
+      <div id="map"></div>
+      <div id="qr" hidden>
+        <canvas id="qr-canvas" width="10" height="10"></canvas>
+        <p id="qr-note"></p>
+      </div>
+    </div>
+    <div class="downloads">
+      <strong>Download:</strong>
+      <button data-file="pack" class="primary" disabled title="ForeFlight content pack: the map overlay plus the waypoints. This is the one to send the pilot.">Content pack (.zip)</button>
+      <button data-file="foreflight_csv" disabled>ForeFlight CSV</button>
+      <button data-file="honeywell_csv" disabled>Honeywell CSV</button>
+      <button data-file="kml" disabled>KML</button>
+      <button data-file="kmz" disabled>KMZ</button>
+      <button data-file="route" disabled title="The ForeFlight route text and its link, for pasting into an email.">Route link (.txt)</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  Everything is calculated in your browser. The coordinates you type are not sent to any
+  server and are kept only in this browser's storage. Turning on a basemap is the one
+  exception: it requests map tiles for the area from Esri.
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

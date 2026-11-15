@@ -22,7 +22,29 @@ is established on track before the first line begins.
 - Keeps **Generate Flight Plan & Update Map** and status feedback pinned above the tabs for laptop-height screens
 - Shows flight summary output in a dedicated **Summary** tab for easier access on smaller displays
 
+## Web app
+`web/` is the same planner as a web page, for people who do not have Python. It is a static
+site: the planning code (`web/survey_engine.py`) runs inside the visitor's browser, so the
+coordinates they type are never sent to a server. It reads and writes the same plan JSON as
+the desktop app.
+
+- **Try it locally:** `python -m http.server 8000 --directory web`, then open
+  <http://localhost:8000>. Opening `index.html` straight from disk does not work.
+- **Deploy:** publish the `web/` folder as-is on any static host; there is no build step. On
+  Cloudflare Pages, set the build output directory to `web` and leave the build command empty.
+- **What it loads from elsewhere:** the Python runtime from jsDelivr and two small libraries
+  from cdnjs on every visit, and map tiles from Esri only if the visitor turns a basemap on
+  (off by default, because tile requests reveal the survey area).
+- **Not in the web version:** the Folium HTML map file (the page's own map replaces it) and
+  drag-to-zoom on the preview (use the map's zoom instead).
+
+`web/survey_engine.py` is a GUI-free copy of the desktop app's logic, so a fix to one must be
+made in the other. `python tests/parity_check.py` runs both on the same plans and fails if
+their CSV, KML or route output differs.
+
 ## Layout
+- `web/` — the browser version; see **Web app** above
+- `tests/parity_check.py` — checks the web engine against the desktop app
 - `airborne_survey_gui.py` — main GUI (scaled path preview drawn in-window; Folium map opens in a browser)
 - `notebooks/` — the original exploratory notebooks. Self-contained: they carry their own
   copy of the geometry code and import nothing from the GUI, so fixes to the app do **not**

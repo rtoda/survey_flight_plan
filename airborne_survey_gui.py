@@ -703,7 +703,7 @@ class FlightPlannerGUI(tk.Tk):
         self.survey_boundary = [
             (43.703, -116.089, 'Boise_Peak'),
             (43.640, -116.062, 'Aldape_Summit'),
-            (43.6125, -116.151, '2967_Shaw_Mtn_Rd'),
+            (43.5949, -116.1429, 'Table_Rock'),
             (43.635, -116.176, 'Crestline_Trailhead')
         ]
         
@@ -1966,7 +1966,16 @@ class FlightPlannerGUI(tk.Tk):
         try:
             os.makedirs(os.path.join(os.getcwd(), PLANS_DIR), exist_ok=True)
             with open(self._pointer_path(), 'w', encoding='utf-8') as f:
-                f.write(os.path.abspath(path))
+                # Relative to plans/ where possible, so the pointer does not carry the user's
+                # home directory -- and so their account name -- into a zipped plans/ folder
+                # or a packaged build. A plan saved on another drive has no relative form
+                # (relpath raises ValueError there), so that one case stays absolute.
+                root = os.path.join(os.getcwd(), PLANS_DIR)
+                try:
+                    stored = os.path.relpath(os.path.abspath(path), root)
+                except ValueError:
+                    stored = os.path.abspath(path)
+                f.write(stored)
         except OSError:
             pass
 
@@ -1981,7 +1990,12 @@ class FlightPlannerGUI(tk.Tk):
         try:
             with open(self._pointer_path(), encoding='utf-8') as f:
                 path = f.read().strip()
-            if not path or not os.path.isfile(path):
+            if not path:
+                return None
+            # Pointers are stored relative to plans/; join leaves an absolute one (another
+            # drive, or a pointer written by an older version) untouched.
+            path = os.path.normpath(os.path.join(os.getcwd(), PLANS_DIR, path))
+            if not os.path.isfile(path):
                 return None
             with open(path, encoding='utf-8') as f:
                 self._apply_plan_dict(json.load(f))
@@ -2480,7 +2494,19 @@ class FlightPlannerGUI(tk.Tk):
         def render_map():
             import folium
 
-            survey_map = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+            # The map is opened straight from disk (file://), so the browser sends no Referer.
+            # OpenStreetMap's tile servers answer that with "403 Access blocked", which is why
+            # the stock basemap came up as a wall of error tiles. Esri's and CARTO's tiles have
+            # no such rule, so they carry the map; OSM stays selectable but is not the default.
+            survey_map = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=None)
+            folium.TileLayer(
+                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+                attr='Tiles &copy; Esri', name='Esri topo', max_zoom=19).add_to(survey_map)
+            folium.TileLayer(
+                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                attr='Tiles &copy; Esri', name='Esri satellite', max_zoom=19, show=False).add_to(survey_map)
+            folium.TileLayer('cartodbpositron', name='CARTO light', show=False).add_to(survey_map)
+            folium.TileLayer('openstreetmap', name='OpenStreetMap (may be blocked)', show=False).add_to(survey_map)
 
             # Colours match the canvas preview so the two views read the same way. Each group
             # is its own FeatureGroup, so LayerControl can switch it off -- the only sane way

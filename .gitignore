@@ -16,6 +16,9 @@ CLAUDE.md
 # so exempt from the blanket *.csv rule above.
 !golden_csv/*.csv
 
+# web/ is the browser version of the planner; its page must survive the *.html rule.
+!web/*.html
+
 # docs/ holds images the README embeds, so they must survive a clone.
 !docs/*.png
 .vscode/
