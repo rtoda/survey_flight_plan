@@ -39,7 +39,7 @@ AREA_MODES = ("Boundary GPS (Max 10)", "CenterPoint")
 
 # The desktop form's defaults, used for any parameter a plan file leaves out.
 DEFAULT_PARAMETERS = {
-    "groundspeed_kt": "200", "swath_width_km": "10.0", "swath_overlap": "0.1",
+    "groundspeed_kt": "200", "bank_angle_deg": "25", "swath_width_km": "10.0", "swath_overlap": "0.1",
     "perimeter_margin_km": "5.0", "initial_heading_deg": "0", "lat_offset": "0.0",
     "lon_offset": "0.0", "lead_in_km": "0.0", "origin_airport": "KBOI",
     "destination_airport": "KBOI", "survey_altitude": "200", "center_lat": "43.6475",
@@ -74,26 +74,6 @@ def dd_to_honeywell_format(value, positive_indicator, negative_indicator, degree
         degrees += 1
         minutes = 0.0
     return f"{sign} {degrees:0{degree_digits}d} {minutes:05.2f}"
-
-def summarize_segment_travel(flight_pattern, groundspeed_kt=200.0):
-    coords = list(flight_pattern.coords)
-    if len(coords) < 2:
-        return [], 0.0, 0.0, 0.0
-
-    segment_summaries = []
-    total_distance_m = 0.0
-    for idx in range(1, len(coords)):
-        x1, y1 = coords[idx - 1]
-        x2, y2 = coords[idx]
-        dist_m = math.hypot(x2 - x1, y2 - y1)
-        dist_nm = dist_m / 1852.0
-        travel_min = (dist_nm / groundspeed_kt) * 60.0 if groundspeed_kt > 0 else float('nan')
-        segment_summaries.append((idx, dist_m, dist_nm, travel_min))
-        total_distance_m += dist_m
-
-    total_distance_nm = total_distance_m / 1852.0
-    total_time_min = (total_distance_nm / groundspeed_kt) * 60.0 if groundspeed_kt > 0 else float('nan')
-    return segment_summaries, total_distance_m, total_distance_nm, total_time_min
 
 def flatten_linestrings(geom):
     """Every non-degenerate LineString inside an arbitrary intersection result."""
@@ -450,6 +430,253 @@ def lead_in_point(first_segment, lead_km):
         return None
     return (x0 - dx / length * lead_km * 1000.0,
             y0 - dy / length * lead_km * 1000.0)
+
+
+# How far the aircraft angles away from the next line before turning back onto it, when the
+# lines are too close together for a plain U-turn. 45 degrees is the conventional figure.
+DEPARTURE_ANGLE_DEG = 45.0
+
+
+def turn_radius_m(groundspeed_kt, bank_deg):
+    """Radius of a level, coordinated turn: v^2 / (g tan(bank)). Zero means "not modelled".
+
+    At 200 kt and 25 degrees of bank that is 2.3 km, so a turn takes 4.6 km of room -- wider
+    than the line spacing of any swath under about 5 km. The speed is the groundspeed field,
+    the only speed this app knows; a real turn follows true airspeed and drifts with the
+    wind, so treat the result as a planning figure rather than a prediction.
+    """
+    if groundspeed_kt <= 0 or bank_deg <= 0:
+        return 0.0
+    speed_ms = groundspeed_kt * 1852.0 / 3600.0
+    return speed_ms * speed_ms / (9.80665 * math.tan(math.radians(bank_deg)))
+
+
+def _fly_pieces(start, theta, pieces, radius):
+    """Fly [("L" | "R" | "S", amount), ...] from a pose; arcs in radians, straights in metres.
+
+    Returns (points, (x, y, theta)): the points exclude `start`, arcs are 10-degree chords.
+    Angles are maths angles -- radians, anticlockwise from east -- so "L" adds to theta.
+    """
+    step = math.radians(10.0)
+    x, y = start
+    points = []
+    for kind, amount in pieces:
+        if amount <= 1e-9:
+            continue
+        if kind == "S":
+            x += amount * math.cos(theta)
+            y += amount * math.sin(theta)
+            points.append((x, y))
+            continue
+        side = 1.0 if kind == "L" else -1.0
+        centre_x = x - side * radius * math.sin(theta)
+        centre_y = y + side * radius * math.cos(theta)
+        chords = max(1, int(math.ceil(amount / step)))
+        for i in range(1, chords + 1):
+            heading = theta + side * amount * i / chords
+            points.append((centre_x + side * radius * math.sin(heading),
+                           centre_y - side * radius * math.cos(heading)))
+        theta += side * amount
+        x, y = points[-1]
+    return points, (x, y, theta)
+
+
+def _arrives(pose, end, end_theta):
+    off_heading = abs((pose[2] - end_theta + math.pi) % (2.0 * math.pi) - math.pi)
+    return math.hypot(pose[0] - end[0], pose[1] - end[1]) <= 1.0 and off_heading <= 1e-3
+
+
+def dubins_turn(start, start_theta, end, end_theta, radius):
+    """Shortest flyable path from one pose to another at a fixed turn radius.
+
+    Poses are a UTM point and the direction of travel as a maths angle. The answer is a
+    Dubins path: an arc, then a straight or a third arc, then an arc.
+
+    Returns (points, length_m). The points exclude `start` and end exactly on `end`, so the
+    caller can append them to a track. Every candidate is flown numerically and kept only if
+    it really arrives at the end pose, so a formula slip can cost optimality but never draws
+    a path that does not connect. If nothing arrives, the straight leg is returned.
+    """
+    two_pi = 2.0 * math.pi
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    gap = math.hypot(dx, dy)
+    d = gap / radius
+    phi = math.atan2(dy, dx) if gap > 0 else 0.0
+    a, b = (start_theta - phi) % two_pi, (end_theta - phi) % two_pi
+    sa, sb, ca, cb, cab = math.sin(a), math.sin(b), math.cos(a), math.cos(b), math.cos(a - b)
+
+    def root(value):                  # rounding leaves exact tangencies a hair negative
+        return math.sqrt(max(value, 0.0)) if value > -1e-9 else None
+
+    def arc(value):
+        return math.acos(max(-1.0, min(1.0, value))) if abs(value) <= 1.0 + 1e-9 else None
+
+    candidates = []
+    p = root(2 + d * d - 2 * cab + 2 * d * (sa - sb))
+    if p is not None:
+        th = math.atan2(cb - ca, d + sa - sb)
+        candidates.append(("LSL", (-a + th) % two_pi, p, (b - th) % two_pi))
+    p = root(2 + d * d - 2 * cab + 2 * d * (sb - sa))
+    if p is not None:
+        th = math.atan2(ca - cb, d - sa + sb)
+        candidates.append(("RSR", (a - th) % two_pi, p, (-b + th) % two_pi))
+    p = root(-2 + d * d + 2 * cab + 2 * d * (sa + sb))
+    if p is not None:
+        th = math.atan2(-ca - cb, d + sa + sb) - math.atan2(-2.0, p)
+        candidates.append(("LSR", (-a + th) % two_pi, p, (-b + th) % two_pi))
+    p = root(d * d - 2 + 2 * cab - 2 * d * (sa + sb))
+    if p is not None:
+        th = math.atan2(ca + cb, d - sa - sb) - math.atan2(2.0, p)
+        candidates.append(("RSL", (a - th) % two_pi, p, (b - th) % two_pi))
+    p = arc((6 - d * d + 2 * cab + 2 * d * (sa - sb)) / 8.0)
+    if p is not None:
+        p = (two_pi - p) % two_pi
+        t = (a - math.atan2(ca - cb, d - sa + sb) + p / 2.0) % two_pi
+        candidates.append(("RLR", t, p, (a - b - t + p) % two_pi))
+    p = arc((6 - d * d + 2 * cab + 2 * d * (sb - sa)) / 8.0)
+    if p is not None:
+        p = (two_pi - p) % two_pi
+        t = (-a - math.atan2(ca - cb, d + sa - sb) + p / 2.0) % two_pi
+        candidates.append(("LRL", t, p, (b - a - t + p) % two_pi))
+
+    for kinds, *amounts in sorted(candidates, key=lambda c: c[1] + c[2] + c[3]):
+        # The formulas work in turn radii; a straight is the only piece that needs scaling.
+        pieces = [(kind, amount * radius if kind == "S" else amount)
+                  for kind, amount in zip(kinds, amounts)]
+        points, pose = _fly_pieces(start, start_theta, pieces, radius)
+        if _arrives(pose, end, end_theta):
+            return (points[:-1] if points else []) + [tuple(end)], sum(amounts) * radius
+    return [tuple(end)], gap
+
+
+def bank_for_radius_deg(groundspeed_kt, radius_m):
+    """The bank angle that flies a given radius; the inverse of turn_radius_m."""
+    if groundspeed_kt <= 0 or radius_m <= 0:
+        return 0.0
+    speed_ms = groundspeed_kt * 1852.0 / 3600.0
+    return math.degrees(math.atan(speed_ms * speed_ms / (9.80665 * radius_m)))
+
+
+def reversal_turn(start, start_theta, end, end_theta, radius, single_arc=True):
+    """Turn round from one line onto a parallel one flown the other way.
+
+    `radius` is the tightest turn allowed. What gets flown depends on how far apart the
+    two lines are:
+
+    A turn diameter or more -- ONE arc, half a circle whose diameter is the gap between the
+    lines. The pilot rolls in once, holds a single bank, and rolls out on the next line.
+    That bank is shallower than the limit whenever the gap is wider than the tightest turn
+    needs. The alternative, a tight quarter turn, a straight, and another quarter turn, is
+    a little shorter but means banking twice, which pilots would rather not. `single_arc`
+    False declines this case, for a join that is not between neighbouring lines: a
+    half-circle spanning the whole box is a long way round.
+
+    Under a turn diameter -- a teardrop. One bank cannot do it without exceeding the limit,
+    so the aircraft first turns *away* from the next line by the departure angle, flies
+    straight for as long as it takes, then makes one continuous turn back and rolls out on
+    the next line's extension with a straight run in to its start. The departure angle is
+    DEPARTURE_ANGLE_DEG, or less when less is enough -- lines only slightly under a
+    diameter apart need just a few degrees and no straight leg at all.
+
+    Where the two line ends are not level, the aircraft carries straight on before the turn
+    or runs straight in after it; either way wings level, outside the turn itself.
+
+    Returns (points, length_m) like dubins_turn, or None when this is not a reversal or the
+    case is declined, and the caller falls back to dubins_turn.
+    """
+    reversed_heading = abs((start_theta - end_theta) % (2.0 * math.pi) - math.pi) <= 1e-6
+    if not reversed_heading:
+        return None
+    hx, hy = math.cos(start_theta), math.sin(start_theta)
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    ahead = dx * hx + dy * hy               # how far past this line's end the next one starts
+    left = hx * dy - hy * dx                # the next line's offset to the left of this one
+    offset = abs(left)
+
+    if offset >= 2.0 * radius - 1e-6:
+        if not single_arc:
+            return None
+        # A half circle comes back level with where it began, so begin it level with
+        # whichever line end is further along.
+        carry_on, run_in = max(0.0, ahead), max(0.0, -ahead)
+        pieces = [("S", carry_on), ("L" if left > 0 else "R", math.pi), ("S", run_in)]
+        points, pose = _fly_pieces(start, start_theta, pieces, offset / 2.0)
+        if not _arrives(pose, end, end_theta):
+            return None
+        return points[:-1] + [tuple(end)], carry_on + run_in + math.pi * offset / 2.0
+
+    limit = math.radians(DEPARTURE_ANGLE_DEG)
+    if offset >= 2.0 * radius * math.cos(limit):
+        angle, straight = math.acos(offset / (2.0 * radius)), 0.0
+    else:
+        angle = limit
+        straight = (2.0 * radius * math.cos(angle) - offset) / math.sin(angle)
+    # Where the turn rolls out, measured along this line from its end. Short of the next
+    # line's start means carrying straight on first; beyond it, a straight run back in.
+    rollout = 2.0 * radius * math.sin(angle) + straight * math.cos(angle)
+    carry_on, run_in = max(0.0, ahead - rollout), max(0.0, rollout - ahead)
+    away, back = ("L", "R") if left <= 0 else ("R", "L")
+    pieces = [("S", carry_on), (away, angle), ("S", straight), (back, math.pi + angle),
+              ("S", run_in)]
+    points, pose = _fly_pieces(start, start_theta, pieces, radius)
+    if not points or not _arrives(pose, end, end_theta):
+        return None
+    length = carry_on + straight + run_in + radius * (math.pi + 2.0 * angle)
+    return points[:-1] + [tuple(end)], length
+
+
+def fly_segments(flown_segments, lead_xy, radius_m, line_numbers=None):
+    """The path actually flown over the survey lines, turns included.
+
+    The waypoint list only names line ends; between the end of one line and the start of the
+    next the aircraft has to turn round, and that turn is neither free nor a straight leg.
+    With a radius, each gap is filled with a turn that leaves one line on its heading and
+    rolls out on the next -- see reversal_turn for the shapes. Anything that is not a
+    reversal between neighbouring lines (the run back to line 1 for a repeat, say) takes
+    the shortest path instead. With radius 0 the gaps are straight legs.
+
+    `line_numbers` says which line each segment is, so neighbours can be told from a join
+    across the box; without it every reversal is treated as one between neighbours.
+
+    Returns (track_points, legs), where legs is [(length_m, is_turn), ...] in flight order.
+    """
+    track, legs = [], []
+    if lead_xy is not None:
+        track.append(tuple(lead_xy))
+    numbers = list(line_numbers) if line_numbers else [1] * len(flown_segments)
+    last_end = last_theta = last_number = None
+    for segment, number in zip(flown_segments, numbers):
+        start, end = tuple(segment.coords[0]), tuple(segment.coords[-1])
+        theta = math.atan2(end[1] - start[1], end[0] - start[0])
+        if last_end is None:
+            if track:
+                legs.append((math.dist(track[-1], start), False))     # the lead-in
+            track.append(start)
+        elif radius_m > 0:
+            neighbours = abs(number - last_number) <= 1
+            points, length = (
+                reversal_turn(last_end, last_theta, start, theta, radius_m, neighbours)
+                or dubins_turn(last_end, last_theta, start, theta, radius_m))
+            track.extend(points)
+            legs.append((length, True))
+        elif last_end != start:           # a retrace turns on the spot: no leg to count
+            track.append(start)
+            legs.append((math.dist(last_end, start), True))
+        track.append(end)
+        legs.append((segment.length, False))
+        last_end, last_theta, last_number = end, theta, number
+    return track, legs
+
+
+def summarize_legs(legs, groundspeed_kt=200.0):
+    """Per-leg and total distance and time for [(length_m, is_turn), ...]."""
+    def minutes(dist_nm):
+        return (dist_nm / groundspeed_kt) * 60.0 if groundspeed_kt > 0 else float('nan')
+
+    summaries = [(idx, dist_m, dist_m / 1852.0, minutes(dist_m / 1852.0), is_turn)
+                 for idx, (dist_m, is_turn) in enumerate(legs, start=1)]
+    total_m = sum(dist_m for dist_m, _is_turn in legs)
+    return summaries, total_m, total_m / 1852.0, minutes(total_m / 1852.0)
 
 
 def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None,
@@ -838,8 +1065,13 @@ def generate(plan):
         lat_off = float(params["lat_offset"])
         lon_off = float(params["lon_offset"])
         lead_in_km = max(0.0, float(params["lead_in_km"]))
+        bank_deg = float(params["bank_angle_deg"])
     except ValueError:
         raise PlanError("Input Error", "Ensure all Flight settings are valid numbers.")
+    if not 0.0 <= bank_deg <= 60.0:
+        raise PlanError("Input Error",
+                        "Bank Angle must be between 0 and 60 degrees. 0 ignores the turn radius.")
+    turn_radius = turn_radius_m(gs, bank_deg)
     try:
         repeats = min(4, max(1, int(float(plan.get("repeats", 1)))))
     except (TypeError, ValueError):
@@ -916,7 +1148,34 @@ def generate(plan):
         raise PlanError("Waypoint Naming Error", str(err))
 
     # 8. Exports
-    segment_summaries, dist_m, dist_nm, time_min = summarize_segment_travel(survey_pattern, gs)
+    # Distance and time follow the path with its turns flown at the turn radius. The KML and
+    # the waypoint files keep the corner-to-corner polyline: the FMS flies its own turns.
+    if segments:
+        flown_track, legs = fly_segments(segments, lead_xy, turn_radius, line_numbers)
+    else:
+        flown_track = list(survey_pattern.coords)
+        legs = [(math.dist(a, b), False) for a, b in zip(flown_track, flown_track[1:])]
+    segment_summaries, dist_m, dist_nm, time_min = summarize_legs(legs, gs)
+    turn_m = sum(length for length, is_turn in legs if is_turn)
+    line_spacing_m = swath * 1000.0 * (1.0 - overlap)
+    if turn_radius <= 0:
+        turn_note = "Turn Radius: not modelled (bank angle 0) — turns counted as straight legs"
+    else:
+        turn_note = (f"Turn Radius: {turn_radius / 1000:.2f} km "
+                     f"({bank_deg:g}° bank at {gs:g} kt)")
+        # Neighbouring lines a turn diameter or more apart are joined by one half circle at
+        # whatever bank fits the gap -- a single roll in and out. Closer than that, one bank
+        # cannot do it within the limit, and the turn becomes a teardrop with two.
+        if segments and not retrace:
+            if line_spacing_m >= 2 * turn_radius:
+                turn_note += (f" — U-turns are one turn at "
+                              f"{bank_for_radius_deg(gs, line_spacing_m / 2):.1f}° bank "
+                              f"({line_spacing_m / 2000:.2f} km radius), filling the "
+                              f"{line_spacing_m / 1000:.2f} km line spacing")
+            else:
+                turn_note += (f" — line spacing {line_spacing_m / 1000:.2f} km is under the "
+                              f"{2 * turn_radius / 1000:.2f} km turn diameter, so each turn "
+                              f"banks twice: away by up to {DEPARTURE_ANGLE_DEG:g}°, then back")
     generated_utc = time.strftime('%Y-%m-%d %H:%MZ', time.gmtime())
     manifest_stamp = time.strftime('%Y%m%dT%H:%M:%SZ', time.gmtime())
     meta = {'lines': len(segments), 'heading': heading, 'dist_nm': dist_nm, 'time_min': time_min}
@@ -1019,6 +1278,9 @@ def generate(plan):
         else "Scope: BOX SKIPPED — transit and make-lines only" if skip_box
         else "Scope: full plan",
         f"Ground Heading: {heading:.1f}° True",
+        turn_note,
+        f"Turns: {sum(1 for _l, is_turn in legs if is_turn)}, "
+        f"{turn_m / 1000:.2f} km ({turn_m / 1852.0:.2f} nm) of the survey path",
         f"Requested Margin: {margin:.2f} km",
         margin_note,
         f"Survey Path: {dist_m / 1000:.2f} km ({dist_nm:.2f} nm)",
@@ -1055,8 +1317,9 @@ def generate(plan):
             total_nm = dist_nm + transit_nm
             stats.append(f"Total w/ Transit: {total_nm:.2f} nm, {(total_nm / gs) * 60.0:.1f} min")
     stats.append("-" * 41)
-    for idx, dm, _dnm, tmin in segment_summaries:
-        stats.append(f"Segment {idx:02d}: {dm / 1000:.1f} km | {tmin:.1f} min")
+    for idx, dm, _dnm, tmin, is_turn in segment_summaries:
+        stats.append(f"Segment {idx:02d}: {dm / 1000:.1f} km | {tmin:.1f} min"
+                     + ("  (turn)" if is_turn else ""))
 
     over_limit = len(waypoints) > MAX_FMS_WAYPOINTS
     short = clearance_m < margin * 1000.0 - 1.0
@@ -1086,7 +1349,7 @@ def generate(plan):
         "files": files,
         "preview": {
             "envelope": [list(p) for p in envelope_latlon],
-            "track": [list(p) for p in track_latlon],
+            "track": [list(p) for p in xy_to_latlon(flown_track)],
             "boundary": [[lat, lon, label] for lat, lon, label in boundary_for_export],
             "waypoints": [[lat, lon, name] for name, lat, lon in survey_waypoints],
             "transit_before": placed(before),

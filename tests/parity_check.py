@@ -2,7 +2,7 @@
 
 The web engine is a GUI-free copy of the desktop app's logic, so the two can drift. This
 drives the real desktop app (a Tk window appears briefly) and the engine over the same
-plans and compares the waypoint CSVs, the KML and the route link. Timestamps are masked;
+plans and compares the waypoint CSVs, the KML, the route link and the summary's figures. Timestamps are masked;
 everything else must match byte for byte.
 
 Run from the repository root:  python tests/parity_check.py
@@ -41,7 +41,7 @@ def plan(name, params=None, **flags):
     base = {
         "schema": "airborne_survey_plan/1", "area_name": name, "waypoint_prefix": "",
         "parameters": {
-            "groundspeed_kt": "200", "swath_width_km": "4.0", "swath_overlap": "0.1",
+            "groundspeed_kt": "200", "bank_angle_deg": "25", "swath_width_km": "4.0", "swath_overlap": "0.1",
             "perimeter_margin_km": "5.0", "initial_heading_deg": "0", "lat_offset": "0.0",
             "lon_offset": "0.0", "lead_in_km": "0.0", "origin_airport": "KBOI",
             "destination_airport": "KBOI", "survey_altitude": "200", "center_lat": "43.6475",
@@ -71,6 +71,8 @@ PLANS = [
          make_line_bearing="Survey heading", make_line_keep_centre=True),
     plan("survey_only", {"lead_in_km": "5"}, transit=TRANSIT, survey_only=True),
     plan("skip_box", transit=TRANSIT, skip_box=True),
+    plan("no_turn_model", {"bank_angle_deg": "0", "lead_in_km": "5"}, retrace_lines=True),
+    plan("wide_turns", {"swath_width_km": "10.0", "bank_angle_deg": "30"}, repeats="2"),
     plan("over_limit", {"swath_width_km": "0.75"}, retrace_lines=True, repeats="2"),
 ]
 
@@ -114,6 +116,14 @@ def main():
                 desktop = f.read().replace("\r\n", "\n")
             if STAMP.sub("T", desktop) != STAMP.sub("T", web["files"][key]["text"].replace("\r\n", "\n")):
                 bad.append(key)
+        # The distance, time and turn figures are computed twice too; compare those lines.
+        figures = ("Turn Radius:", "Turns:", "Survey Path:", "Est. Survey Time:", "Segment ",
+                   "Transit Path:", "Total w/ Transit:", "Actual Padding:", "Waypoints in CSV:")
+        desktop_stats = [line for line in app.stats_text.get("1.0", "end").splitlines()
+                         if line.startswith(figures)]
+        web_stats = [line for line in web["summary"].splitlines() if line.startswith(figures)]
+        if desktop_stats != web_stats:
+            bad.append("summary figures")
         rows = web["files"]["foreflight_csv"]["text"].count("\n") - 1
         failures += bool(bad)
         print(f"{'FAIL' if bad else 'ok  '} {name}: {rows} waypoints"

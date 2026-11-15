@@ -41,6 +41,8 @@ const FIELDS = {
       tip: "Drops that many lines from both sides of the box. This gives up real coverage; the Summary tab reports the padding actually achieved." },
     { kind: "param", key: "groundspeed_kt", label: "Groundspeed (knots)", value: "200",
       tip: "Used for the time estimates and sent to ForeFlight as the cruise speed." },
+    { kind: "param", key: "bank_angle_deg", label: "Bank Angle (deg)", value: "25",
+      tip: "Sets the turn radius between survey lines, together with the groundspeed. 25 is the usual autopilot bank limit. Distance, time and the drawn track include the turns; the waypoint files do not change. 0 counts turns as straight legs." },
     { kind: "param", key: "swath_width_km", label: "Swath Width (km)", value: "10.0",
       tip: "Width of ground the sensor covers on one pass." },
     { kind: "param", key: "swath_overlap", label: "Swath Overlap (0.0-1.0)", value: "0.1",

@@ -142,6 +142,30 @@ the target itself is being clipped. That figure is measured against the ground a
 covered, not assumed, so trust it. Asking for more lines than the area has is refused with a
 message rather than quietly flying whatever is left.
 
+**Bank Angle** (default 25°, the usual autopilot limit) sets the turn radius between survey
+lines, together with Groundspeed: 2.3 km at 200 kt. Distance, time and the drawn track then
+follow the turns the aircraft has to fly rather than straight legs from one line end to the
+next, and the summary lists each turn. Set 0 to count turns as straight legs, as earlier
+versions did.
+
+The bank angle is a **limit**, and the turns are shaped so the pilot banks as few times as
+possible:
+
+- **Lines at least a turn diameter apart** (4.6 km at the defaults) are joined by one half
+  circle that fills the gap — roll in once, hold one bank, roll out on the next line. The
+  bank is whatever fits the spacing, so it is shallower than the limit on wide spacing:
+  13.5° for lines 9 km apart at 200 kt. The summary states the bank used.
+- **Lines closer than that** cannot be joined by one bank without exceeding the limit, so the
+  turn is a teardrop with two: the aircraft angles away from the next line by up to 45°,
+  flies straight as long as needed, then makes one continuous turn back and rolls out on the
+  next line's extension with a straight run in to its start. A retrace reverses the same way.
+- **Joins that are not between neighbouring lines**, such as the run back to line 1 for a
+  repeat, take the shortest path: a turn, a straight, and a turn.
+
+**The waypoint files, the KML and the route link do not change** — they name line ends, and
+the FMS flies its own turns between them. The radius comes from groundspeed, not true
+airspeed, and ignores wind, so treat the turn figures as planning numbers.
+
 **Lead-in Distance** puts a waypoint that far back from the first line's start, along that
 line's own bearing, so the aircraft rolls out wings-level and is established on track before
 the line — and the sensor run — begins. It is named `IL01` (intercept, line 1), so the
