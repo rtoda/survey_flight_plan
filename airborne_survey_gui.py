@@ -120,7 +120,7 @@ def measure_clearance(target_poly, coverage_poly, samples=400):
     return 0.0 if worst is None else worst
 
 
-def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1, retrace=False, entry_xy=None, exit_xy=None, skip_edges=0):
+def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1, retrace=False, entry_xy=None, exit_xy=None, skip_edges=0, first_rows=None):
     _load_geometry()   # safe to call the engine without building the GUI
     if len(latlon_coords) < 3:
         raise ValueError('At least three coordinates are required to define a survey area.')
@@ -263,7 +263,9 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
     # waypoint (and the run out to the next) shortest, instead of always starting at the
     # bottom-left and crossing the box to get there.
     best = None
-    for flip_rows in (False, True):
+    # first_rows pins which outer line is flown first (False: the right-hand edge looking
+    # along the heading, True: the left); the entry and exit still pick which end of it.
+    for flip_rows in ((False, True) if first_rows is None else (bool(first_rows),)):
         for flip_direction in (False, True):
             candidate = assemble(flip_rows, flip_direction)
             cost = 0.0
@@ -1000,6 +1002,94 @@ def flight_time_lines(pattern_nm, pattern_min, survey_kt, outbound_nm, inbound_n
     return lines, transit_min, total_min
 
 
+# --- FIRST LINE ---
+#
+# The survey lines are parallel, so the line flown first is one of the two outermost --
+# one on each side of the box, across the heading. Those two sides are named by compass
+# point for the heading in use: West/East edge at 000, Northwest/Southeast at 045,
+# North/South at 090. Offering only those two names is what keeps the choice unambiguous:
+# "north" means nothing at 000, where both outer lines are equally far north, and the
+# drop-down simply does not offer it.
+
+COMPASS_POINTS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+COMPASS_NAMES = {"N": "North", "NE": "Northeast", "E": "East", "SE": "Southeast",
+                 "S": "South", "SW": "Southwest", "W": "West", "NW": "Northwest"}
+
+
+def compass_point(bearing_deg):
+    """Nearest of the eight compass points to a bearing. Opposite bearings always get
+    opposite points, so the two edges of a box can never share a name."""
+    return COMPASS_POINTS[int(((bearing_deg % 360.0) + 22.5) // 45.0) % 8]
+
+
+def edge_choices(heading_deg):
+    """(right edge, left edge): the compass points of the two outermost lines, looking
+    along the heading. The right-hand edge is the one build_rectangular_pattern reaches
+    with first_rows=False."""
+    return compass_point(heading_deg + 90.0), compass_point(heading_deg - 90.0)
+
+
+def first_line_rows(heading_deg, choice):
+    """Turn a First Line choice into build_rectangular_pattern's first_rows.
+
+    Returns (first_rows, note): False for the right-hand edge, True for the left, None for
+    Auto -- the corner nearest the entry, as before. A compass point that is not one of this
+    heading's two edges (the heading changed after it was picked, or a hand-edited plan)
+    goes to whichever edge it is nearer; one exactly between the two is ambiguous, and
+    falls back to Auto with a note saying so.
+    """
+    choice = (choice or "Auto").strip()
+    if choice == "Auto":
+        return None, ""
+    right, left = edge_choices(heading_deg)
+    if choice == right:
+        return False, ""
+    if choice == left:
+        return True, ""
+    edges = f"{COMPASS_NAMES[right]} or {COMPASS_NAMES[left]}"
+    if choice not in COMPASS_POINTS:
+        return None, f"First Line: {choice!r} not understood — use Auto, {edges}"
+    target = COMPASS_POINTS.index(choice) * 45.0
+
+    def off(bearing):
+        return abs((bearing - target + 180.0) % 360.0 - 180.0)
+
+    to_right, to_left = off(heading_deg + 90.0), off(heading_deg - 90.0)
+    if abs(to_right - to_left) < 1e-6:
+        return None, (f"First Line: {COMPASS_NAMES[choice]} is ambiguous at heading "
+                      f"{heading_deg:g}° — the outer lines are the {edges} edge; "
+                      f"nearest the entry used")
+    return to_right > to_left, ""
+
+
+def first_line_edge(segments, heading_deg):
+    """Compass point of the edge the first survey line actually sits on, for the summary.
+
+    None when there is no box or only one row, so no edge to speak of.
+    """
+    if not segments:
+        return None
+    mids = [segment.interpolate(0.5, normalized=True) for segment in segments]
+    cx = sum(p.x for p in mids) / len(mids)
+    cy = sum(p.y for p in mids) / len(mids)
+    rx, ry = math.sin(math.radians(heading_deg + 90.0)), math.cos(math.radians(heading_deg + 90.0))
+    side = (mids[0].x - cx) * rx + (mids[0].y - cy) * ry
+    if abs(side) < 1.0:
+        return None
+    return compass_point(heading_deg + 90.0 if side > 0 else heading_deg - 90.0)
+
+
+def first_line_summary(segments, heading_deg, first_rows, note):
+    """Summary lines for the First Line choice."""
+    lines = [note] if note else []
+    if segments:
+        edge = first_line_edge(segments, heading_deg)
+        how = "chosen" if first_rows is not None else "Auto, nearest the entry"
+        lines.append(f"First Line: {COMPASS_NAMES[edge]} edge ({how})" if edge
+                     else "First Line: single row of lines")
+    return lines
+
+
 # --- HOVER HELP ---
 
 class ToolTip:
@@ -1114,6 +1204,10 @@ class FlightPlannerGUI(tk.Tk):
         # Rows dropped from each end of the box. Trades coverage at the edges for flight
         # time; the summary reports the padding that survives, which may go negative.
         self.skip_edges = tk.StringVar(value="0")
+        # Which outer line is flown first: "Auto" or a compass point (see edge_choices).
+        # first_line holds the code that is saved; first_line_label is what the box shows.
+        self.first_line = tk.StringVar(value="Auto")
+        self.first_line_label = tk.StringVar(value="Auto (nearest entry)")
         # The exact inverse of survey_only: fly the transit waypoints and their make-lines
         # and no box at all. Both ticked would leave nothing, which is refused.
         self.skip_box = tk.BooleanVar(value=False)
@@ -1399,6 +1493,23 @@ class FlightPlannerGUI(tk.Tk):
         ToolTip(skip_box, skip_tip)
         ToolTip(skip_label, skip_tip)
 
+        first_label = ttk.Label(param_tab, text="First Line:")
+        first_label.grid(row=10, column=0, sticky="w", pady=5)
+        self.first_line_box = ttk.Combobox(param_tab, width=20, state="readonly",
+                                           textvariable=self.first_line_label)
+        self.first_line_box.grid(row=10, column=1, sticky="w", pady=5, padx=10)
+        self.first_line_box.bind("<<ComboboxSelected>>", self._first_line_selected)
+        first_tip = ("Which of the two outermost lines is flown first. The choices are named "
+                     "for the current Initial Heading: West or East edge at 000, Northwest "
+                     "or Southeast at 045, North or South at 090 -- only the two edges that "
+                     "exist, so the choice can never be ambiguous. They update as the "
+                     "heading changes.\n\n"
+                     "Auto starts at the corner nearest where the aircraft arrives from. "
+                     "Either way, the end of the line to start at is the one nearer the "
+                     "arrival, and the chosen line becomes line 1.")
+        ToolTip(self.first_line_box, first_tip)
+        ToolTip(first_label, first_tip)
+
         fields = [
             # Two speeds: the pattern is flown slower than the run out to it and back. The key
             # stays "groundspeed_kt" so plans saved before the split still load.
@@ -1427,14 +1538,20 @@ class FlightPlannerGUI(tk.Tk):
         ]
 
         # Starts below the rows above: 4 rectangular box, 5 area mode, 6 repeats,
-        # 7 retrace, 8 survey-box-only, 9 skip edge lines. Adding a control means moving this, or the
-        # first field lands in the same cell and Tk silently overlaps the two.
-        for i, (label_text, dict_key, default_val) in enumerate(fields, start=10):
+        # 7 retrace, 8 survey-box-only, 9 skip edge lines, 10 first line. Adding a control
+        # means moving this, or the first field lands in the same cell and Tk silently
+        # overlaps the two.
+        for i, (label_text, dict_key, default_val) in enumerate(fields, start=11):
             ttk.Label(param_tab, text=label_text).grid(row=i, column=0, sticky="w", pady=5)
             entry = ttk.Entry(param_tab, width=15)
             entry.insert(0, default_val)
             entry.grid(row=i, column=1, sticky="w", pady=5, padx=10)
             self.inputs[dict_key] = entry
+
+        # The First Line choices are named for the heading, so they follow it as it is typed.
+        for event in ("<KeyRelease>", "<FocusOut>"):
+            self.inputs["initial_heading_deg"].bind(event, self._refresh_first_line, add="+")
+        self._refresh_first_line()
 
         # TAB 2: COORDINATES INPUT (MAX 10)
         coords_tab = ttk.Frame(notebook, padding=10)
@@ -1770,6 +1887,40 @@ class FlightPlannerGUI(tk.Tk):
             messagebox.showinfo("No Map Yet", "Generate a flight plan first.")
             return
         webbrowser.open(Path(self._map_path).absolute().as_uri())
+
+    def _first_line_options(self):
+        """[(code, label), ...] for the First Line box at the heading currently typed."""
+        options = [("Auto", "Auto (nearest entry)")]
+        try:
+            heading = float(self.inputs["initial_heading_deg"].get())
+        except (KeyError, ValueError):
+            return options
+        return options + [(code, f"{COMPASS_NAMES[code]} edge") for code in edge_choices(heading)]
+
+    def _refresh_first_line(self, _event=None):
+        """Rename the First Line choices for the heading, keeping the pick where it maps.
+
+        A pick from the old heading moves to whichever new edge it is nearer; one that sits
+        exactly between them goes back to Auto rather than guessing.
+        """
+        options = self._first_line_options()
+        self.first_line_box["values"] = [label for _code, label in options]
+        code = self.first_line.get()
+        codes = [c for c, _label in options]
+        if code not in codes:
+            if len(codes) == 3:
+                rows, _note = first_line_rows(float(self.inputs["initial_heading_deg"].get()),
+                                              code)
+                code = "Auto" if rows is None else codes[2 if rows else 1]
+            else:
+                code = "Auto" if code not in COMPASS_POINTS else code
+        self.first_line.set(code)
+        self.first_line_label.set(dict(options).get(code, f"{code} edge"))
+
+    def _first_line_selected(self, _event=None):
+        labels = {label: code for code, label in self._first_line_options()}
+        self.first_line.set(labels.get(self.first_line_label.get(), "Auto"))
+        self.calculate_and_render()
 
     def _open_in_foreflight(self):
         """Hand the route link to the operating system, which opens ForeFlight if installed.
@@ -2264,6 +2415,7 @@ class FlightPlannerGUI(tk.Tk):
             "survey_only": self.survey_only.get(),
             "skip_edges": self.skip_edges.get(),
             "skip_box": self.skip_box.get(),
+            "first_line": self.first_line.get(),
             "make_line_bearing": self.make_line_bearing.get(),
             "make_line_keep_centre": self.make_line_keep_centre.get(),
             "boundary": boundary,
@@ -2315,6 +2467,10 @@ class FlightPlannerGUI(tk.Tk):
                 data["make_line_bearing"]
                 if data["make_line_bearing"] in ("Along track", "Survey heading")
                 else "Along track")
+        # Absent in plans saved before it existed, which means Auto. The parameters above
+        # have already set the heading, so the choices are renamed for it here.
+        self.first_line.set(str(data.get("first_line") or "Auto"))
+        self._refresh_first_line()
         if "skip_edges" in data:
             # Clamped to the dropdown's range in case the file was hand-edited.
             try:
@@ -2658,6 +2814,8 @@ class FlightPlannerGUI(tk.Tk):
         # silently move the survey, which is exactly the trap worth avoiding.
         survey_only = self.survey_only.get()
         skip_box = self.skip_box.get()
+        self._refresh_first_line()
+        first_rows, first_note = first_line_rows(heading, self.first_line.get())
         if survey_only and skip_box:
             messagebox.showerror(
                 "Nothing To Fly",
@@ -2690,7 +2848,7 @@ class FlightPlannerGUI(tk.Tk):
                     survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m,
                     center_lat, rectangular=self.rectangular_box.get(), repeats=repeats,
                     retrace=self.retrace_lines.get(), entry_xy=entry_xy, exit_xy=exit_xy,
-                    skip_edges=skip_edges
+                    skip_edges=skip_edges, first_rows=first_rows
                 )
             except Exception as e:
                 messagebox.showerror("Execution Error", str(e))
@@ -2853,6 +3011,7 @@ class FlightPlannerGUI(tk.Tk):
             if segments else "Survey Lines: none — box skipped",
             f"Skipped Edges: {skip_edges} per end ({2 * skip_edges} lines dropped)"
             if skip_edges and segments else "Skipped Edges: none",
+            *first_line_summary(segments, heading, first_rows, first_note),
             # Distinguish "you set it to 0" from "it is set but this view suppresses it",
             # or the panel reads as though the lead-in had been lost.
             f"Lead-in: {lead_in_km:.2f} km on the line bearing" if lead_xy is not None
@@ -2935,7 +3094,7 @@ class FlightPlannerGUI(tk.Tk):
 
         stats_output.append("-" * 41)
         for idx, dm, dnm, tmin, is_turn in segment_summaries:
-            stats_output.append(f"Segment {idx:02d}: {dm/1000:.1f} km | {format_minutes(tmin)}"
+            stats_output.append(f"Segment {idx:02d}: {dm/1000:.1f} km | {tmin:.1f} min"
                                 + ("  (turn)" if is_turn else ""))
 
         self.stats_text.insert(tk.END, "\n".join(stats_output))

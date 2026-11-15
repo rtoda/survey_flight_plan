@@ -39,6 +39,9 @@ const FIELDS = {
     { kind: "choice", key: "skip_edges", label: "Skip Edge Lines (each end)", value: "0",
       options: ["0", "1", "2", "3"],
       tip: "Drops that many lines from both sides of the box. This gives up real coverage; the Summary tab reports the padding actually achieved." },
+    { kind: "choice", key: "first_line", label: "First Line", value: "Auto", options: ["Auto"],
+      dynamic: true,
+      tip: "Which of the two outermost lines is flown first. The choices are named for the current Initial Heading: West or East edge at 000, Northwest or Southeast at 045, North or South at 090 -- only the two edges that exist, so the choice is never ambiguous. They update as the heading changes. Auto starts at the corner nearest where the aircraft arrives from. The chosen line becomes line 1." },
     { kind: "param", key: "groundspeed_kt", label: "Survey Groundspeed (knots)", value: "200",
       tip: "Speed flown in the pattern: the lead-in, the survey lines and the turns between them. Sets the in-pattern time and, with the bank angle, the turn radius." },
     { kind: "param", key: "transit_groundspeed_kt", label: "Transit Groundspeed (knots)", value: "200",
@@ -244,9 +247,11 @@ function applyPlan(data) {
       value = field.kind === "param" ? base.parameters[field.key] : base[field.key];
     }
     if (field.kind === "flag") element.checked = Boolean(value);
+    else if (field.dynamic) continue;   // set below, once the heading it depends on is in
     else if (field.kind === "choice") element.value = field.options.includes(String(value)) ? String(value) : field.value;
     else element.value = String(value);
   }
+  refreshFirstLine(data.first_line || "Auto");
   fillTable("boundary-table", data.boundary);
   fillTable("before-table", transit.before || []);
   fillTable("after-table", transit.after || []);
@@ -262,6 +267,43 @@ function restorePlan() {
     if (saved) { applyPlan(JSON.parse(saved)); return; }
   } catch (_) { /* unreadable or stale: fall through to the demo area */ }
   applyPlan(defaultPlan());
+}
+
+// ---------- first line ----------
+// The two outermost lines sit on opposite sides of the box, across the heading. They are
+// offered by compass point for the heading in use -- West/East at 000, Northwest/Southeast
+// at 045, North/South at 090 -- so the drop-down never holds a choice that means nothing.
+// Mirrors compass_point / edge_choices / first_line_rows in survey_engine.py.
+
+const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+const COMPASS_NAMES = { N: "North", NE: "Northeast", E: "East", SE: "Southeast",
+                        S: "South", SW: "Southwest", W: "West", NW: "Northwest" };
+
+function compassPoint(bearing) {
+  return COMPASS[Math.floor((((bearing % 360) + 360) % 360 + 22.5) / 45) % 8];
+}
+
+// Rebuild the First Line options for the heading typed now. `wanted` is the code to keep
+// (default: the current pick); one from another heading moves to the nearer edge, or to
+// Auto when it sits exactly between the two.
+function refreshFirstLine(wanted) {
+  const select = controls.first_line.element;
+  const current = wanted !== undefined ? String(wanted) : (select.value || "Auto");
+  const heading = parseFloat(controls.initial_heading_deg.element.value);
+  const edges = Number.isFinite(heading) ? [compassPoint(heading + 90), compassPoint(heading - 90)] : [];
+  select.length = 0;
+  select.add(new Option("Auto (nearest entry)", "Auto"));
+  for (const code of edges) select.add(new Option(`${COMPASS_NAMES[code]} edge`, code));
+  let pick = "Auto";
+  if (edges.includes(current)) {
+    pick = current;
+  } else if (edges.length && COMPASS.includes(current)) {
+    const target = COMPASS.indexOf(current) * 45;
+    const off = (b) => Math.abs(((((b - target + 180) % 360) + 360) % 360) - 180);
+    const toRight = off(heading + 90), toLeft = off(heading - 90);
+    if (Math.abs(toRight - toLeft) >= 1e-6) pick = toRight < toLeft ? edges[0] : edges[1];
+  }
+  select.value = pick;
 }
 
 // ---------- status ----------
@@ -495,6 +537,7 @@ async function main() {
   buildRows("before-table", TRANSIT_ROWS, ["ident", "lat", "lon", "label", "make_line"]);
   buildRows("after-table", TRANSIT_ROWS, ["ident", "lat", "lon", "label", "make_line"]);
   restorePlan();
+  controls.initial_heading_deg.element.addEventListener("input", () => refreshFirstLine());
   startMap();
 
   for (const button of document.querySelectorAll(".tabs button")) {

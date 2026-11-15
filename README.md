@@ -24,6 +24,7 @@ Inbound Transit 3 min, Total Flight Time 33 min.
 - Saves and reloads a whole plan — boundary points and every parameter — as JSON
 - Renders a scannable QR of the ForeFlight route link right in the window (no Pillow needed)
 - **Open in ForeFlight** hands the same route to ForeFlight when it is installed on the device
+- **First Line** chooses which side of the box is flown first, offered by compass edge for the heading
 - Keeps **Generate Flight Plan & Update Map** and status feedback pinned above the tabs for laptop-height screens
 - Shows flight summary output in a dedicated **Summary** tab for easier access on smaller displays
 - Estimates in-pattern, outbound, inbound and total flight time, with separate survey and
@@ -236,6 +237,27 @@ no transit waypoints, the origin airport) and left toward the next, rather
 than always at line 1's start — approaching the default area from the north, that is a
 23.98 km run in instead of 43.55 km across the box and back. The ground covered is
 identical either way.
+
+**First Line** picks which side of the box is flown first instead. The lines are parallel,
+so the first line is always one of the two outermost, one on each side of the box across the
+heading, and the drop-down offers exactly those two, named by compass point for the
+**Initial Heading** in use:
+
+| Initial Heading | First Line choices |
+|---|---|
+| 000 or 180 (lines run north–south) | West edge, East edge |
+| 045 or 225 (lines run northeast–southwest) | Northwest edge, Southeast edge |
+| 090 or 270 (lines run east–west) | North edge, South edge |
+| 135 or 315 (lines run northwest–southeast) | Northeast edge, Southwest edge |
+
+Only offering the two edges that exist is what keeps the choice unambiguous: at 000 both
+outer lines are equally far north, so "north" means nothing there, and it is simply not
+offered. The choices are renamed as the heading is typed, and a pick carries over to
+whichever new edge it is nearer — West at 000 becomes Northwest at 045 — or back to
+**Auto** when it sits exactly between the two. **Auto** (the default) keeps the behaviour
+above: the corner nearest the arrival. Either way, the end of the first line to start at is
+the one nearer the arrival, the chosen line becomes line 1 (`SL01` / `NL01`), and the
+summary reports which edge was flown first.
 
 Ticking **Line** on a transit row flies a short survey line through that waypoint instead of
 just passing over it. **Make-Line Length** (default 20 km) is the whole line end to end, so

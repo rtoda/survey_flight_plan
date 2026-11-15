@@ -82,6 +82,10 @@ PLANS = [
     plan("diagonal_45", {"initial_heading_deg": "45", "swath_width_km": "2.0"}),
     plan("diagonal_135", {"initial_heading_deg": "135", "swath_width_km": "2.0"},
          transit=TRANSIT, make_line_bearing="Survey heading"),
+    plan("first_east", {"swath_width_km": "2.0"}, first_line="E"),
+    plan("first_west_transit", {"lead_in_km": "5"}, transit=TRANSIT, first_line="W"),
+    plan("first_nw_45", {"initial_heading_deg": "45", "swath_width_km": "2.0"}, first_line="NW",
+         retrace_lines=True),
     plan("over_limit", {"swath_width_km": "0.75"}, retrace_lines=True, repeats="2"),
 ]
 
@@ -128,7 +132,7 @@ def main():
         # The distance, time and turn figures are computed twice too; compare those lines.
         figures = ("Turn Radius:", "Turns:", "Survey Path:", "In-Pattern Time:", "Segment ",
                    "Transit Path:", "Outbound Transit:", "Inbound Transit:", "Transit Time:", "Total Flight Time:", "Actual Padding:",
-                   "Waypoints in CSV:",
+                   "Waypoints in CSV:", "First Line:",
                    "Origin:", "Destination:")
         desktop_stats = [line for line in app.stats_text.get("1.0", "end").splitlines()
                          if line.startswith(figures)]

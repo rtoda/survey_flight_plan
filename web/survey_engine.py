@@ -111,7 +111,7 @@ def measure_clearance(target_poly, coverage_poly, samples=400):
     return 0.0 if worst is None else worst
 
 
-def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1, retrace=False, entry_xy=None, exit_xy=None, skip_edges=0):
+def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin_km, initial_heading_deg, lat_offset, lon_offset, transformer_to_m, center_lat, rectangular=True, repeats=1, retrace=False, entry_xy=None, exit_xy=None, skip_edges=0, first_rows=None):
     _load_geometry()   # safe to call the engine without building the GUI
     if len(latlon_coords) < 3:
         raise ValueError('At least three coordinates are required to define a survey area.')
@@ -254,7 +254,9 @@ def build_rectangular_pattern(latlon_coords, swath_km, overlap, perimeter_margin
     # waypoint (and the run out to the next) shortest, instead of always starting at the
     # bottom-left and crossing the box to get there.
     best = None
-    for flip_rows in (False, True):
+    # first_rows pins which outer line is flown first (False: the right-hand edge looking
+    # along the heading, True: the left); the entry and exit still pick which end of it.
+    for flip_rows in ((False, True) if first_rows is None else (bool(first_rows),)):
         for flip_direction in (False, True):
             candidate = assemble(flip_rows, flip_direction)
             cost = 0.0
@@ -990,6 +992,94 @@ def flight_time_lines(pattern_nm, pattern_min, survey_kt, outbound_nm, inbound_n
                  f"{pattern_nm + transit_nm:.2f} nm")
     return lines, transit_min, total_min
 
+
+# --- FIRST LINE ---
+#
+# The survey lines are parallel, so the line flown first is one of the two outermost --
+# one on each side of the box, across the heading. Those two sides are named by compass
+# point for the heading in use: West/East edge at 000, Northwest/Southeast at 045,
+# North/South at 090. Offering only those two names is what keeps the choice unambiguous:
+# "north" means nothing at 000, where both outer lines are equally far north, and the
+# drop-down simply does not offer it.
+
+COMPASS_POINTS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+COMPASS_NAMES = {"N": "North", "NE": "Northeast", "E": "East", "SE": "Southeast",
+                 "S": "South", "SW": "Southwest", "W": "West", "NW": "Northwest"}
+
+
+def compass_point(bearing_deg):
+    """Nearest of the eight compass points to a bearing. Opposite bearings always get
+    opposite points, so the two edges of a box can never share a name."""
+    return COMPASS_POINTS[int(((bearing_deg % 360.0) + 22.5) // 45.0) % 8]
+
+
+def edge_choices(heading_deg):
+    """(right edge, left edge): the compass points of the two outermost lines, looking
+    along the heading. The right-hand edge is the one build_rectangular_pattern reaches
+    with first_rows=False."""
+    return compass_point(heading_deg + 90.0), compass_point(heading_deg - 90.0)
+
+
+def first_line_rows(heading_deg, choice):
+    """Turn a First Line choice into build_rectangular_pattern's first_rows.
+
+    Returns (first_rows, note): False for the right-hand edge, True for the left, None for
+    Auto -- the corner nearest the entry, as before. A compass point that is not one of this
+    heading's two edges (the heading changed after it was picked, or a hand-edited plan)
+    goes to whichever edge it is nearer; one exactly between the two is ambiguous, and
+    falls back to Auto with a note saying so.
+    """
+    choice = (choice or "Auto").strip()
+    if choice == "Auto":
+        return None, ""
+    right, left = edge_choices(heading_deg)
+    if choice == right:
+        return False, ""
+    if choice == left:
+        return True, ""
+    edges = f"{COMPASS_NAMES[right]} or {COMPASS_NAMES[left]}"
+    if choice not in COMPASS_POINTS:
+        return None, f"First Line: {choice!r} not understood — use Auto, {edges}"
+    target = COMPASS_POINTS.index(choice) * 45.0
+
+    def off(bearing):
+        return abs((bearing - target + 180.0) % 360.0 - 180.0)
+
+    to_right, to_left = off(heading_deg + 90.0), off(heading_deg - 90.0)
+    if abs(to_right - to_left) < 1e-6:
+        return None, (f"First Line: {COMPASS_NAMES[choice]} is ambiguous at heading "
+                      f"{heading_deg:g}° — the outer lines are the {edges} edge; "
+                      f"nearest the entry used")
+    return to_right > to_left, ""
+
+
+def first_line_edge(segments, heading_deg):
+    """Compass point of the edge the first survey line actually sits on, for the summary.
+
+    None when there is no box or only one row, so no edge to speak of.
+    """
+    if not segments:
+        return None
+    mids = [segment.interpolate(0.5, normalized=True) for segment in segments]
+    cx = sum(p.x for p in mids) / len(mids)
+    cy = sum(p.y for p in mids) / len(mids)
+    rx, ry = math.sin(math.radians(heading_deg + 90.0)), math.cos(math.radians(heading_deg + 90.0))
+    side = (mids[0].x - cx) * rx + (mids[0].y - cy) * ry
+    if abs(side) < 1.0:
+        return None
+    return compass_point(heading_deg + 90.0 if side > 0 else heading_deg - 90.0)
+
+
+def first_line_summary(segments, heading_deg, first_rows, note):
+    """Summary lines for the First Line choice."""
+    lines = [note] if note else []
+    if segments:
+        edge = first_line_edge(segments, heading_deg)
+        how = "chosen" if first_rows is not None else "Auto, nearest the entry"
+        lines.append(f"First Line: {COMPASS_NAMES[edge]} edge ({how})" if edge
+                     else "First Line: single row of lines")
+    return lines
+
 # ---- PORTED verbatim from airborne_survey_gui.py: end -----------------------------------
 
 
@@ -1258,6 +1348,7 @@ def generate(plan):
 
     # "Survey box only" filters the output after the entry/exit hints are taken, so the
     # survey itself is identical with it on or off. Do not move this above the hints.
+    first_rows, first_note = first_line_rows(heading, _text(plan.get("first_line")) or "Auto")
     if survey_only and skip_box:
         raise PlanError(
             "Nothing To Fly",
@@ -1285,7 +1376,8 @@ def generate(plan):
             survey_poly, survey_pattern, segments, line_numbers = build_rectangular_pattern(
                 survey_boundary, swath, overlap, margin, heading, lat_off, lon_off, to_m,
                 center_lat, rectangular=rectangular, repeats=repeats, retrace=retrace,
-                entry_xy=entry_xy, exit_xy=exit_xy, skip_edges=skip_edges)
+                entry_xy=entry_xy, exit_xy=exit_xy, skip_edges=skip_edges,
+                first_rows=first_rows)
         except Exception as err:
             raise PlanError("Execution Error", str(err))
 
@@ -1448,6 +1540,7 @@ def generate(plan):
         if segments else "Survey Lines: none — box skipped",
         f"Skipped Edges: {skip_edges} per end ({2 * skip_edges} lines dropped)"
         if skip_edges and segments else "Skipped Edges: none",
+        *first_line_summary(segments, heading, first_rows, first_note),
         f"Lead-in: {lead_in_km:.2f} km on the line bearing" if lead_xy is not None
         else f"Lead-in: {lead_in_km:.2f} km, hidden by Survey box only"
         if survey_only and lead_in_km > 0 else "Lead-in: off",
@@ -1503,7 +1596,7 @@ def generate(plan):
     stats.extend(time_lines)
     stats.append("-" * 41)
     for idx, dm, _dnm, tmin, is_turn in segment_summaries:
-        stats.append(f"Segment {idx:02d}: {dm / 1000:.1f} km | {format_minutes(tmin)}"
+        stats.append(f"Segment {idx:02d}: {dm / 1000:.1f} km | {tmin:.1f} min"
                      + ("  (turn)" if is_turn else ""))
 
     over_limit = len(waypoints) > MAX_FMS_WAYPOINTS
