@@ -5,10 +5,14 @@ exports waypoints for ForeFlight and a Honeywell FMS.
 
 ![The planner: parameters and boundary points on the left, scaled flight-path preview on the right](docs/screenshot.png)
 
-Above: a 4 km swath at heading 000 — six equal-length north-south lines, each end named for
-the compass end it sits at, so `SL03` is the south end of line 3. The grey dashed leg runs in
-from a transit waypoint to `IL01`, an 8 km lead-in on the line's own bearing, so the aircraft
-is established on track before the first line begins.
+Above: a 4 km swath at Initial Heading 045, flown at a survey groundspeed of 200 kt with
+250 kt in transit, from and back to KBOI. Five equal-length lines run north-east, each end
+named for the compass end it sits at — N/S, since a 045 diagonal is named on that pair. The dotted loops between them are the turns the
+aircraft has to fly at 25° of bank — 45° teardrops, because the 3.6 km line spacing is
+tighter than a turn diameter — counted in the time but never written as waypoints. `IL01` is
+an 8 km lead-in on the first line's bearing, and the grey legs are the transit from KBOI and
+back. The Summary tab for this plan reads: In-Pattern Time 28 min, Outbound Transit 1 min,
+Inbound Transit 3 min, Total Flight Time 33 min.
 
 ## Features
 - Interactive Tkinter GUI to define the survey area by either boundary vertices or a center point rectangle, plus flight parameters
@@ -21,6 +25,9 @@ is established on track before the first line begins.
 - Renders a scannable QR of the ForeFlight route link right in the window (no Pillow needed)
 - Keeps **Generate Flight Plan & Update Map** and status feedback pinned above the tabs for laptop-height screens
 - Shows flight summary output in a dedicated **Summary** tab for easier access on smaller displays
+- Estimates in-pattern, outbound, inbound and total flight time, with separate survey and
+  transit groundspeeds and the turns between lines flown at a set bank angle
+- Places ICAO origin and destination airports (`KLAX`, `KSLC`) from a built-in airport table
 
 ## Web app
 `web/` is the same planner as a web page, for people who do not have Python. It is a static
@@ -45,6 +52,7 @@ their CSV, KML or route output differs.
 ## Layout
 - `web/` — the browser version; see **Web app** above
 - `tests/parity_check.py` — checks the web engine against the desktop app
+- `tools/build_airports.py` — rebuilds `web/airports.csv`, the ICAO airport table
 - `airborne_survey_gui.py` — main GUI (scaled path preview drawn in-window; Folium map opens in a browser)
 - `notebooks/` — the original exploratory notebooks. Self-contained: they carry their own
   copy of the geometry code and import nothing from the GUI, so fixes to the app do **not**
@@ -142,8 +150,26 @@ the target itself is being clipped. That figure is measured against the ground a
 covered, not assumed, so trust it. Asking for more lines than the area has is refused with a
 message rather than quietly flying whatever is left.
 
+**Survey Groundspeed** and **Transit Groundspeed** are entered separately, because the
+pattern is usually flown slower than the run out to it and back. The summary splits the time
+three ways:
+
+- **In-Pattern Time** — the lead-in, the survey lines and the turns between them, at the
+  survey groundspeed.
+- **Outbound Transit** — from the origin airport through the "before" waypoints to the
+  pattern, at the transit groundspeed.
+- **Inbound Transit** — from the pattern through the "after" waypoints to the destination,
+  at the transit groundspeed.
+- **Transit Time** — outbound and inbound together.
+- **Total Flight Time** — the two added together, with the total distance.
+
+The status line under the button repeats the pattern and total times. With **Skip survey
+box**, the whole route of transit waypoints and make-lines counts as the pattern, and only the
+airport legs count as transit. Plans saved before the split load with the transit speed at its
+default of 200 kt, so check it.
+
 **Bank Angle** (default 25°, the usual autopilot limit) sets the turn radius between survey
-lines, together with Groundspeed: 2.3 km at 200 kt. Distance, time and the drawn track then
+lines, together with the survey groundspeed: 2.3 km at 200 kt. Distance, time and the drawn track then
 follow the turns the aircraft has to fly rather than straight legs from one line end to the
 next, and the summary lists each turn. Set 0 to count turns as straight legs, as earlier
 versions did.
@@ -155,15 +181,21 @@ possible:
   circle that fills the gap — roll in once, hold one bank, roll out on the next line. The
   bank is whatever fits the spacing, so it is shallower than the limit on wide spacing:
   13.5° for lines 9 km apart at 200 kt. The summary states the bank used.
-- **Lines closer than that** cannot be joined by one bank without exceeding the limit, so the
-  turn is a teardrop with two: the aircraft angles away from the next line by up to 45°,
-  flies straight as long as needed, then makes one continuous turn back and rolls out on the
-  next line's extension with a straight run in to its start. A retrace reverses the same way.
+- **Lines closer than that** — a fast aircraft flying a narrow swath — use a **teardrop
+  course reversal**: the aircraft turns away from the next line onto an outbound leg 45° off
+  its heading, flies it as long as needed, then makes one continuous turn back and rolls out
+  on the next line's extension with a straight run in to its start. A retrace reverses the
+  same way. Where the lines are only a little under a diameter apart, the outbound leg
+  shrinks to nothing and the turn back is flown slightly wider, so the departure is always
+  the full 45° and the bank never exceeds the limit. At 375 kt and 25° (an 8.1 km radius),
+  lines 0.9 km apart cost about 75 km per turn.
 - **Joins that are not between neighbouring lines**, such as the run back to line 1 for a
   repeat, take the shortest path: a turn, a straight, and a turn.
 
-**The waypoint files, the KML and the route link do not change** — they name line ends, and
-the FMS flies its own turns between them. The radius comes from groundspeed, not true
+**The turns are only for estimating flight time.** The waypoint files, the KML, the content
+pack and the route link do not change — they name line ends only, because the FMS waypoint
+memory is limited and the FMS flies its own turns between them. Only the summary's distance
+and time and the drawn track include the turns. The radius comes from groundspeed, not true
 airspeed, and ignores wind, so treat the turn figures as planning numbers.
 
 **Lead-in Distance** puts a waypoint that far back from the first line's start, along that
@@ -187,7 +219,19 @@ an identifier (`BOI`, `DANDD`) **or** a lat/lon pair:
 - A **lat/lon** row is written to both CSVs bracketing the survey waypoints, drawn on the
   preview as a grey dashed leg, and included in the transit distance.
 
-The survey box is entered at whichever corner is nearest the last transit waypoint, rather
+**Origin Airport** and **Destination Airport** take ICAO codes (`KLAX`, `KSLC`). Besides
+starting and ending the ForeFlight route link, a code found in the built-in airport table
+(`web/airports.csv`, about 10,000 airports from the public-domain OurAirports data) is placed
+on the map: drawn at the ends of the transit legs, counted in **Transit Time** and **Total
+Flight Time** as a straight leg to the first waypoint and from the last, and named in the summary so a typo is
+easy to spot. Airports are **never written to the waypoint files** — the FMS knows them, and
+its waypoint memory is limited. A code that is not in the table still goes in the route link
+and the summary says it was not drawn or counted. Refresh the table with
+`python tools/build_airports.py`; a PyInstaller build must bundle it with
+`--add-data "web/airports.csv;."`.
+
+The survey box is entered at whichever corner is nearest the last transit waypoint (or, with
+no transit waypoints, the origin airport) and left toward the next, rather
 than always at line 1's start — approaching the default area from the north, that is a
 23.98 km run in instead of 43.55 km across the box and back. The ground covered is
 identical either way.
@@ -233,7 +277,7 @@ the polygon's vertices, which changes the shape of the survey area when Boundary
 Typed labels are coerced to what ForeFlight accepts — all capitals, at least 3 characters,
 at least one letter, no spaces — so `entry gate` becomes `ENTRY_GATE`. Anything that cannot
 be salvaged falls back to a generated name like `B02`. The summary reports survey and
-transit distance separately.
+transit distance and time separately.
 
 **Waypoints in CSV** on the summary panel, and the status line under the button, give the
 total number of points written — the row count of both CSVs, split into survey and transit
@@ -295,16 +339,18 @@ The cruise altitude and speed are stated **once at the end** of the route, in Fo
 documented `DESTINATION+SPEED+ALTITUDE` form, rather than on every waypoint — the
 per-waypoint `/F###` suffix exists to mark a level *change* partway along, which a survey
 never has. That saves 5 characters per waypoint, 387 on an 80-waypoint plan, which is
-directly fewer QR modules to scan. The speed comes from the **Groundspeed** field; without it
-ForeFlight loads the route but warns `Cruise TAS required for performance calculations`.
+directly fewer QR modules to scan. The speed comes from the **Transit Groundspeed** field,
+since most of the route is transit; without a speed ForeFlight loads the route but warns
+`Cruise TAS required for performance calculations`.
 
 See [foreflight.md](foreflight.md) for the import rules these files are built against,
 including which claims are verified against ForeFlight's docs and which are not.
 
 ## Notes & Tips
 - Waypoints are named `SL01` / `NL01` — the **south and north ends of line 1**. The letters
-  are N/S for lines running predominantly north-south and E/W for east-west, following the
-  line's own bearing. The lead-in is `IL01`.
+  are N/S for lines running predominantly north-south and E/W for east-west, chosen once
+  from **Initial Heading** so every line in a plan uses the same pair. The diagonals — 045,
+  135, 225 and 315 — are N/S. The lead-in is `IL01`.
 - A name is a *place*, not a step in the sequence, so a retrace revisits the same names and
   the list reads in flight order: `SL01, NL01, SL01, SL02, NL02, SL02`. The turnaround is
   listed once. Names are therefore not unique across a plan with repeats or retrace.

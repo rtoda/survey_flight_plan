@@ -39,8 +39,10 @@ const FIELDS = {
     { kind: "choice", key: "skip_edges", label: "Skip Edge Lines (each end)", value: "0",
       options: ["0", "1", "2", "3"],
       tip: "Drops that many lines from both sides of the box. This gives up real coverage; the Summary tab reports the padding actually achieved." },
-    { kind: "param", key: "groundspeed_kt", label: "Groundspeed (knots)", value: "200",
-      tip: "Used for the time estimates and sent to ForeFlight as the cruise speed." },
+    { kind: "param", key: "groundspeed_kt", label: "Survey Groundspeed (knots)", value: "200",
+      tip: "Speed flown in the pattern: the lead-in, the survey lines and the turns between them. Sets the in-pattern time and, with the bank angle, the turn radius." },
+    { kind: "param", key: "transit_groundspeed_kt", label: "Transit Groundspeed (knots)", value: "200",
+      tip: "Speed flown to and from the pattern: the transit waypoints and the legs from the origin airport and to the destination. Sets the transit time, and is sent to ForeFlight as the cruise speed." },
     { kind: "param", key: "bank_angle_deg", label: "Bank Angle (deg)", value: "25",
       tip: "Sets the turn radius between survey lines, together with the groundspeed. 25 is the usual autopilot bank limit. Distance, time and the drawn track include the turns; the waypoint files do not change. 0 counts turns as straight legs." },
     { kind: "param", key: "swath_width_km", label: "Swath Width (km)", value: "10.0",
@@ -60,9 +62,9 @@ const FIELDS = {
   ],
   "route-fields": [
     { kind: "param", key: "origin_airport", label: "Origin Airport", value: "KBOI",
-      tip: "Start of the ForeFlight route link. Not used by the survey geometry." },
+      tip: "ICAO code, e.g. KLAX. Starts the ForeFlight route link, and when the code is in the built-in airport table it is drawn, counted in the flight distance and time, and used to pick the corner the box is entered from. Never added to the waypoint files." },
     { kind: "param", key: "destination_airport", label: "Destination Airport", value: "KBOI",
-      tip: "End of the ForeFlight route link. Not used by the survey geometry." },
+      tip: "ICAO code, e.g. KSLC. Ends the ForeFlight route link, and when the code is in the built-in airport table it is drawn and counted like the origin. Never added to the waypoint files." },
     { kind: "param", key: "survey_altitude", label: "Survey Flight Level", value: "200",
       tip: "200 means FL200, 20,000 ft. Sent to ForeFlight as the cruise altitude." },
   ],
@@ -286,6 +288,11 @@ async function startEngine() {
   const response = await fetch("survey_engine.py", { cache: "no-cache" });
   if (!response.ok) throw new Error(`survey_engine.py: HTTP ${response.status}`);
   pyodide.FS.writeFile("survey_engine.py", await response.text());
+  // The airport table is optional: without it airports go undrawn and the summary says so.
+  try {
+    const airports = await fetch("airports.csv");
+    if (airports.ok) pyodide.FS.writeFile("airports.csv", await airports.text());
+  } catch (_) { /* offline or blocked: carry on without it */ }
   engine = pyodide.runPython("import survey_engine\nsurvey_engine.generate_json");
 }
 

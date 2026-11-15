@@ -18,6 +18,7 @@ CLAUDE.md
 
 # web/ is the browser version of the planner; its page must survive the *.html rule.
 !web/*.html
+!web/airports.csv
 
 # docs/ holds images the README embeds, so they must survive a clone.
 !docs/*.png

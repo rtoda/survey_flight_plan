@@ -62,6 +62,14 @@ MAX_WAYPOINT_NAME = 5
 # equipment's and the plan may be for someone else's.
 MAX_FMS_WAYPOINTS = 123
 
+# Where the ICAO airport table is looked for: the repository copy the web app also serves,
+# then beside a PyInstaller build's unpacked files (bundle it with
+# --add-data "web/airports.csv;."). First one found wins.
+AIRPORT_FILES = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "airports.csv"),
+    os.path.join(getattr(sys, "_MEIPASS", ""), "airports.csv"),
+]
+
 # --- SURVEY ENGINE CONFIGURATION & HELPERS ---
 
 def dd_to_honeywell_format(value, positive_indicator, negative_indicator, degree_digits=2):
@@ -405,17 +413,31 @@ def build_survey_kml(area_name, envelope_latlon, track_latlon, waypoints, bounda
     return out.getvalue()
 
 
-def line_end_labels(segment):
+def naming_axis(bearing_deg):
+    """"NS" or "EW": which pair of letters names the ends of a line on this bearing.
+
+    N/S for lines running predominantly north-south, E/W for east-west. The diagonals --
+    045, 135, 225, 315 -- are N/S. A tolerance of a millionth of a degree absorbs rounding,
+    so a heading of exactly 45 is not split between the two by floating-point noise.
+    """
+    bearing = bearing_deg % 180.0
+    return "NS" if bearing <= 45.0 + 1e-6 or bearing >= 135.0 - 1e-6 else "EW"
+
+
+def line_end_labels(segment, axis=None):
     """Which compass end of its line each end of this segment sits at.
 
-    Returns (start_letter, finish_letter). The pair is N/S for lines running predominantly
-    north-south and E/W for lines running predominantly east-west, decided by which axis
-    the line is closer to. Flying north means starting at the South end, hence ('S', 'N').
+    Returns (start_letter, finish_letter). Flying north means starting at the South end,
+    hence ('S', 'N'). `axis` ("NS" or "EW", from naming_axis) names every line of a plan on
+    the same pair; give the survey heading's axis for survey lines. Left out, it is worked
+    out from this segment's own bearing -- fine for a lone line, but on a survey it let
+    rounding name some lines N/S and others E/W at a heading of exactly 45.
     """
     (x0, y0), (x1, y1) = segment.coords[0], segment.coords[-1]
     dx, dy = x1 - x0, y1 - y0
-    bearing = math.degrees(math.atan2(dx, dy)) % 180.0
-    if bearing < 45.0 or bearing >= 135.0:
+    if axis is None:
+        axis = naming_axis(math.degrees(math.atan2(dx, dy)))
+    if axis == "NS":
         return ('S', 'N') if dy > 0 else ('N', 'S')
     return ('W', 'E') if dx > 0 else ('E', 'W')
 
@@ -438,8 +460,9 @@ def lead_in_point(first_segment, lead_km):
             y0 - dy / length * lead_km * 1000.0)
 
 
-# How far the aircraft angles away from the next line before turning back onto it, when the
-# lines are too close together for a plain U-turn. 45 degrees is the conventional figure.
+# How far the aircraft angles away from the next line before turning back onto it -- the
+# outbound angle of a teardrop course reversal, used when the lines are too close together
+# for a U-turn. 45 degrees is the conventional figure, and it is always used in full.
 DEPARTURE_ANGLE_DEG = 45.0
 
 
@@ -460,13 +483,18 @@ def turn_radius_m(groundspeed_kt, bank_deg):
 def _fly_pieces(start, theta, pieces, radius):
     """Fly [("L" | "R" | "S", amount), ...] from a pose; arcs in radians, straights in metres.
 
+    An arc may carry its own radius as a third element, ("R", amount, radius); otherwise it
+    is flown at `radius`.
+
     Returns (points, (x, y, theta)): the points exclude `start`, arcs are 10-degree chords.
     Angles are maths angles -- radians, anticlockwise from east -- so "L" adds to theta.
     """
     step = math.radians(10.0)
     x, y = start
     points = []
-    for kind, amount in pieces:
+    default_radius = radius
+    for kind, amount, *own in pieces:
+        radius = own[0] if own else default_radius
         if amount <= 1e-9:
             continue
         if kind == "S":
@@ -577,12 +605,15 @@ def reversal_turn(start, start_theta, end, end_theta, radius, single_arc=True):
     False declines this case, for a join that is not between neighbouring lines: a
     half-circle spanning the whole box is a long way round.
 
-    Under a turn diameter -- a teardrop. One bank cannot do it without exceeding the limit,
-    so the aircraft first turns *away* from the next line by the departure angle, flies
-    straight for as long as it takes, then makes one continuous turn back and rolls out on
-    the next line's extension with a straight run in to its start. The departure angle is
-    DEPARTURE_ANGLE_DEG, or less when less is enough -- lines only slightly under a
-    diameter apart need just a few degrees and no straight leg at all.
+    Under a turn diameter -- the teardrop course reversal, which is how a fast aircraft
+    flying a narrow swath gets from one line to the next. One bank cannot do it without
+    exceeding the limit, so the aircraft turns *away* from the next line onto an outbound
+    leg DEPARTURE_ANGLE_DEG off its heading, flies it for as long as the geometry needs,
+    then makes one continuous turn back and rolls out on the next line's extension with a
+    straight run in to its start. Lines only a little under a diameter apart would need a
+    negative outbound leg at the limiting radius; there the outbound leg is dropped and the
+    turn back is flown a little wider instead, so the departure is still the full 45 degrees
+    and the bank never exceeds the limit.
 
     Where the two line ends are not level, the aircraft carries straight on before the turn
     or runs straight in after it; either way wings level, outside the turn itself.
@@ -611,23 +642,29 @@ def reversal_turn(start, start_theta, end, end_theta, radius, single_arc=True):
             return None
         return points[:-1] + [tuple(end)], carry_on + run_in + math.pi * offset / 2.0
 
-    limit = math.radians(DEPARTURE_ANGLE_DEG)
-    if offset >= 2.0 * radius * math.cos(limit):
-        angle, straight = math.acos(offset / (2.0 * radius)), 0.0
+    angle = math.radians(DEPARTURE_ANGLE_DEG)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    outbound = (2.0 * radius * cos_a - offset) / sin_a
+    if outbound >= 0.0:
+        back_radius = radius
     else:
-        angle = limit
-        straight = (2.0 * radius * math.cos(angle) - offset) / math.sin(angle)
-    # Where the turn rolls out, measured along this line from its end. Short of the next
-    # line's start means carrying straight on first; beyond it, a straight run back in.
-    rollout = 2.0 * radius * math.sin(angle) + straight * math.cos(angle)
-    carry_on, run_in = max(0.0, ahead - rollout), max(0.0, rollout - ahead)
+        # Too wide for an outbound leg: widen the turn back until it fits. Equals `radius`
+        # at the hand-over point and reaches about 1.34x it at a full diameter.
+        outbound, back_radius = 0.0, (offset + radius * (1.0 - cos_a)) / (1.0 + cos_a)
     away, back = ("L", "R") if left <= 0 else ("R", "L")
-    pieces = [("S", carry_on), (away, angle), ("S", straight), (back, math.pi + angle),
-              ("S", run_in)]
+    reversal = [(away, angle, radius), ("S", outbound), (back, math.pi + angle, back_radius)]
+
+    # Where the reversal rolls out, measured along this line from its end. Short of the next
+    # line's start means carrying straight on first; beyond it, a straight run back in.
+    _points, pose = _fly_pieces(start, start_theta, reversal, radius)
+    rollout = (pose[0] - start[0]) * hx + (pose[1] - start[1]) * hy
+    carry_on, run_in = max(0.0, ahead - rollout), max(0.0, rollout - ahead)
+    pieces = [("S", carry_on)] + reversal + [("S", run_in)]
     points, pose = _fly_pieces(start, start_theta, pieces, radius)
     if not points or not _arrives(pose, end, end_theta):
         return None
-    length = carry_on + straight + run_in + radius * (math.pi + 2.0 * angle)
+    length = (carry_on + outbound + run_in + radius * angle
+              + back_radius * (math.pi + angle))
     return points[:-1] + [tuple(end)], length
 
 
@@ -774,7 +811,9 @@ def expand_transit_lines(points, distance_km, to_m, to_latlon, heading_deg=None,
         reach = distance_km * 1000.0 / 2.0
         start_xy = (px - ux * reach, py - uy * reach)
         end_xy = (px + ux * reach, py + uy * reach)
-        head, tail = line_end_labels(LineString([start_xy, end_xy]))
+        head, tail = line_end_labels(
+            LineString([start_xy, end_xy]),
+            naming_axis(heading_deg) if heading_deg is not None else None)
         stem = point["name"][:4]
         (start_lat, start_lon), (end_lat, end_lon) = to_latlon([start_xy, end_xy])
 
@@ -854,6 +893,111 @@ def build_foreflight_route(waypoints, origin, destination, flight_level,
         pass
 
     return route_text, f"foreflightmobile://maps/search?q={route_text}"
+
+
+# --- AIRPORTS ---
+#
+# The Origin and Destination Airport fields take ICAO codes (KLAX, KSLC). A code found in the
+# airport table becomes a placed point: drawn, counted in the flight distance, and used to
+# pick which corner of the box to enter from. It is never written to the waypoint files --
+# the FMS knows its airports, its waypoint memory is limited, and the route link already
+# names both ends. The table is web/airports.csv, built from OurAirports by
+# tools/build_airports.py; AIRPORT_FILES says where each app looks for it.
+
+_AIRPORTS = {}
+
+
+def load_airports():
+    """ICAO code -> (lat, lon, name), read once from the first AIRPORT_FILES entry found.
+
+    Empty if no table can be read, in which case every code reports as not found and the
+    airports simply go undrawn -- the route link still carries them.
+    """
+    if not _AIRPORTS:
+        for path in AIRPORT_FILES:
+            try:
+                with open(path, encoding='utf-8') as f:
+                    lines = [line for line in f if not line.startswith('#')]
+            except OSError:
+                continue
+            for row in csv.DictReader(lines):
+                try:
+                    _AIRPORTS[row['icao'].strip().upper()] = (
+                        float(row['lat']), float(row['lon']), row['name'].strip())
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    continue
+            if _AIRPORTS:
+                break
+    return _AIRPORTS
+
+
+def airport_point(code, role):
+    """A route endpoint as a placed point, or None, plus a summary line saying which.
+
+    `role` is "Origin" or "Destination". The point has the same shape as a transit
+    waypoint, so the drawing and distance code needs nothing special for it.
+    """
+    code = (code or '').strip().upper()
+    found = load_airports().get(code)
+    if found is None:
+        why = ("not in the airport table" if load_airports()
+               else "the airport table could not be loaded")
+        return None, (f"{role}: {code} — {why}; kept in the route link, not drawn or "
+                      f"counted")
+    lat, lon, name = found
+    return ({"ident": code, "lat": lat, "lon": lon, "name": code, "make_line": False},
+            f"{role}: {code} {name}")
+
+
+# --- FLIGHT TIME ---
+
+def format_minutes(minutes):
+    """Whole minutes, because the time is an estimate: 90.4 -> "1 h 30 min", 42.3 -> "42 min".
+
+    Anything above zero but under half a minute reads "under 1 min" rather than "0 min", and
+    NaN (no speed to divide by) reads "n/a".
+    """
+    if minutes != minutes:
+        return "n/a"
+    if 0 < minutes < 0.5:
+        return "under 1 min"
+    hours, mins = divmod(int(round(minutes)), 60)
+    return f"{hours} h {mins:02d} min" if hours else f"{mins} min"
+
+
+def flight_time_lines(pattern_nm, pattern_min, survey_kt, outbound_nm, inbound_nm,
+                      transit_kt):
+    """Summary lines for the time in the pattern, in transit each way, and in total.
+
+    The pattern -- lead-in, survey lines and the turns between them -- is flown at the survey
+    groundspeed. Transit is flown at the transit groundspeed, which for most aircraft is a
+    good deal faster, and is reported each way: outbound is from the origin airport through
+    the "before" waypoints to the pattern, inbound from the pattern through the "after"
+    waypoints to the destination.
+
+    Returns (lines, transit_min, total_min). With nothing to fly in transit the total is just
+    the pattern time.
+    """
+    def minutes(dist_nm):
+        if dist_nm <= 0:
+            return 0.0
+        return (dist_nm / transit_kt) * 60.0 if transit_kt > 0 else float('nan')
+
+    outbound_min, inbound_min = minutes(outbound_nm), minutes(inbound_nm)
+    transit_nm, transit_min = outbound_nm + inbound_nm, outbound_min + inbound_min
+    total_min = pattern_min + transit_min
+    lines = [f"In-Pattern Time: {format_minutes(pattern_min)} — "
+             f"{pattern_nm:.2f} nm at {survey_kt:g} kt"]
+    if transit_nm > 0:
+        for label, dist_nm, mins in (("Outbound Transit", outbound_nm, outbound_min),
+                                     ("Inbound Transit", inbound_nm, inbound_min)):
+            lines.append(f"{label}: {format_minutes(mins)} — "
+                         f"{dist_nm:.2f} nm at {transit_kt:g} kt")
+        lines.append(f"Transit Time: {format_minutes(transit_min)} — "
+                     f"{transit_nm:.2f} nm")
+    lines.append(f"Total Flight Time: {format_minutes(total_min)} — "
+                 f"{pattern_nm + transit_nm:.2f} nm")
+    return lines, transit_min, total_min
 
 
 # --- HOVER HELP ---
@@ -1256,7 +1400,10 @@ class FlightPlannerGUI(tk.Tk):
         ToolTip(skip_label, skip_tip)
 
         fields = [
-            ("Groundspeed (knots):", "groundspeed_kt", "200"),
+            # Two speeds: the pattern is flown slower than the run out to it and back. The key
+            # stays "groundspeed_kt" so plans saved before the split still load.
+            ("Survey Groundspeed (knots):", "groundspeed_kt", "200"),
+            ("Transit Groundspeed (knots):", "transit_groundspeed_kt", "200"),
             # Sets the turn radius used between survey lines: 25 degrees is the usual
             # autopilot bank limit. 0 goes back to counting turns as straight legs.
             ("Bank Angle (deg):", "bank_angle_deg", "25"),
@@ -2394,6 +2541,7 @@ class FlightPlannerGUI(tk.Tk):
         # 5. Parse Flight Settings Safely
         try:
             gs = float(self.inputs["groundspeed_kt"].get())
+            transit_gs = float(self.inputs["transit_groundspeed_kt"].get())
             swath = float(self.inputs["swath_width_km"].get())
             overlap = float(self.inputs["swath_overlap"].get())
             margin = float(self.inputs["perimeter_margin_km"].get())
@@ -2454,10 +2602,18 @@ class FlightPlannerGUI(tk.Tk):
 
         mapped_before = [p for p in before if p["lat"] is not None]
         mapped_after = [p for p in after if p["lat"] is not None]
-        entry_xy = to_m.transform(mapped_before[-1]["lon"], mapped_before[-1]["lat"]) \
-            if mapped_before else None
-        exit_xy = to_m.transform(mapped_after[0]["lon"], mapped_after[0]["lat"]) \
-            if mapped_after else None
+        origin_code = self.inputs["origin_airport"].get().strip().upper() or "KBOI"
+        destination_code = self.inputs["destination_airport"].get().strip().upper() or "KBOI"
+        origin_pt, origin_note = airport_point(origin_code, "Origin")
+        destination_pt, destination_note = airport_point(destination_code, "Destination")
+        # The box is entered from whatever the aircraft arrives from: the last placed transit
+        # waypoint, or failing that the origin airport. Likewise for leaving.
+        arrives_from = mapped_before[-1] if mapped_before else origin_pt
+        leaves_to = mapped_after[0] if mapped_after else destination_pt
+        entry_xy = to_m.transform(arrives_from["lon"], arrives_from["lat"]) \
+            if arrives_from else None
+        exit_xy = to_m.transform(leaves_to["lon"], leaves_to["lat"]) \
+            if leaves_to else None
 
         # "Survey box only" filters the output; it does not plan a different flight. The
         # entry/exit hints above are taken from the real transit points first, so the corner
@@ -2478,6 +2634,8 @@ class FlightPlannerGUI(tk.Tk):
         if survey_only:
             before = after = []
             mapped_before = mapped_after = []
+            origin_pt = destination_pt = None
+            origin_note = destination_note = ""
 
         if skip_box:
             # No box at all: the sortie is the transit chain and whatever make-lines sit on
@@ -2531,7 +2689,7 @@ class FlightPlannerGUI(tk.Tk):
         try:
             ff_file, hw_file, waypoints, survey_waypoints = self._export_csv_files(
                 segments, xy_to_latlon, area_name, waypoint_prefix, out_dir, before, after,
-                lead_xy, line_numbers)
+                lead_xy, line_numbers, naming_axis(heading))
         except ValueError as err:
             messagebox.showerror("Waypoint Naming Error", str(err))
             return
@@ -2548,6 +2706,30 @@ class FlightPlannerGUI(tk.Tk):
             legs = [(math.dist(a, b), False) for a, b in zip(flown_track, flown_track[1:])]
         segment_summaries, dist_m, dist_nm, time_min = summarize_legs(legs, gs)
         turn_m = sum(length for length, is_turn in legs if is_turn)
+        # Airport legs: from the origin to the first placed point of the flight, and from the
+        # last one to the destination. Straight lines -- a planning figure, like the rest.
+        first_xy = (to_m.transform(mapped_before[0]["lon"], mapped_before[0]["lat"])
+                    if mapped_before else flown_track[0])
+        last_xy = (to_m.transform(mapped_after[-1]["lon"], mapped_after[-1]["lat"])
+                   if mapped_after else flown_track[-1])
+        airport_m = airport_out_m = airport_in_m = 0.0
+        airport_lines = []
+        for point, note, joins, leaving in ((origin_pt, origin_note, first_xy, True),
+                                            (destination_pt, destination_note, last_xy, False)):
+            if point is None:
+                if note:
+                    airport_lines.append(note)
+                continue
+            leg_m = math.dist(to_m.transform(point["lon"], point["lat"]), joins)
+            airport_m += leg_m
+            if leaving:
+                airport_out_m += leg_m
+            else:
+                airport_in_m += leg_m
+            airport_lines.append(f"{note} — {leg_m / 1000:.1f} km ({leg_m / 1852.0:.1f} nm) "
+                                 + ("to the first waypoint" if leaving else "from the last"))
+        drawn_before = ([origin_pt] if origin_pt else []) + mapped_before
+        drawn_after = mapped_after + ([destination_pt] if destination_pt else [])
         line_spacing_m = swath * 1000.0 * (1.0 - overlap)
         if turn_radius <= 0:
             turn_note = "Turn Radius: not modelled (bank angle 0) — turns counted as straight legs"
@@ -2566,7 +2748,7 @@ class FlightPlannerGUI(tk.Tk):
                 else:
                     turn_note += (f" — line spacing {line_spacing_m / 1000:.2f} km is under the "
                                   f"{2 * turn_radius / 1000:.2f} km turn diameter, so each turn "
-                                  f"banks twice: away by up to {DEPARTURE_ANGLE_DEG:g}°, then back")
+                                  f"is a teardrop: out at {DEPARTURE_ANGLE_DEG:g}°, then back")
 
         generated_utc = time.strftime('%Y-%m-%d %H:%MZ', time.gmtime())
         manifest_stamp = time.strftime('%Y%m%dT%H:%M:%SZ', time.gmtime())
@@ -2588,11 +2770,13 @@ class FlightPlannerGUI(tk.Tk):
         # survey geometry, so bad input degrades the link rather than the flight plan.
         route_text, route_url = build_foreflight_route(
             survey_waypoints,
-            self.inputs["origin_airport"].get().strip().upper() or "KBOI",
-            self.inputs["destination_airport"].get().strip().upper() or "KBOI",
+            origin_code,
+            destination_code,
             self.inputs["survey_altitude"].get().strip() or "200",
             before=before, after=after,
-            cruise_kt=self.inputs["groundspeed_kt"].get().strip(),
+            # The route covers the whole flight, most of it in transit, so ForeFlight gets
+            # the transit speed as its cruise speed.
+            cruise_kt=self.inputs["transit_groundspeed_kt"].get().strip(),
         )
         self._route = (route_text, route_url)
         route_file = os.path.join(out_dir, f"{area_name}_foreflight_route.txt")
@@ -2650,7 +2834,6 @@ class FlightPlannerGUI(tk.Tk):
             f"Requested Margin: {margin:.2f} km",
             margin_note,
             f"Survey Path: {dist_m/1000:.2f} km ({dist_nm:.2f} nm)",
-            f"Est. Survey Time: {time_min:.1f} min",
             # Row count of both CSVs, after consecutive duplicate names are collapsed --
             # what the pilot actually loads, not the number of line ends the geometry has.
             f"Waypoints in CSV: {len(waypoints)}"
@@ -2689,6 +2872,7 @@ class FlightPlannerGUI(tk.Tk):
         # With no box there is nothing to run in to, and the whole chain is already counted
         # as the flight path above -- measuring legs against a box that is not there would
         # double-count it.
+        transit_nm = transit_out_m = transit_in_m = 0.0
         if (before or after) and segments:
             transit_m = 0.0
             for chain, anchor in ((mapped_before, segments[0].coords[0]),
@@ -2697,20 +2881,27 @@ class FlightPlannerGUI(tk.Tk):
                     continue
                 legs = [to_m.transform(p["lon"], p["lat"]) for p in chain]
                 legs = legs + [anchor] if chain is mapped_before else [anchor] + legs
-                transit_m += sum(math.dist(a, b) for a, b in zip(legs, legs[1:]))
+                side_m = sum(math.dist(a, b) for a, b in zip(legs, legs[1:]))
+                transit_m += side_m
+                if chain is mapped_before:
+                    transit_out_m += side_m
+                else:
+                    transit_in_m += side_m
             transit_nm = transit_m / 1852.0
             unmapped = (len(before) - len(mapped_before)) + (len(after) - len(mapped_after))
             stats_output.append(
                 f"Transit Path: {transit_m/1000:.2f} km ({transit_nm:.2f} nm)"
                 + (f"  [{unmapped} by identifier, not counted]" if unmapped else ""))
-            if gs > 0:
-                total_nm = dist_nm + transit_nm
-                stats_output.append(
-                    f"Total w/ Transit: {total_nm:.2f} nm, {(total_nm / gs) * 60.0:.1f} min")
+        stats_output.extend(airport_lines)
+        # Pattern at the survey speed; transit waypoints and airport legs at the transit speed.
+        time_lines, transit_min, total_min = flight_time_lines(
+            dist_nm, time_min, gs, (transit_out_m + airport_out_m) / 1852.0,
+            (transit_in_m + airport_in_m) / 1852.0, transit_gs)
+        stats_output.extend(time_lines)
 
         stats_output.append("-" * 41)
         for idx, dm, dnm, tmin, is_turn in segment_summaries:
-            stats_output.append(f"Segment {idx:02d}: {dm/1000:.1f} km | {tmin:.1f} min"
+            stats_output.append(f"Segment {idx:02d}: {dm/1000:.1f} km | {format_minutes(tmin)}"
                                 + ("  (turn)" if is_turn else ""))
 
         self.stats_text.insert(tk.END, "\n".join(stats_output))
@@ -2740,10 +2931,11 @@ class FlightPlannerGUI(tk.Tk):
             # Transit legs run from the last mapped "before" point into the first survey
             # waypoint, and out of the last one into the "after" points. Identifier-only
             # rows are absent, so a leg may simply be missing rather than wrong.
+            # The origin and destination airports, when placed, ride at the two ends.
             'transit_before': [(*to_m.transform(p["lon"], p["lat"]), p["name"])
-                               for p in before if p["lat"] is not None],
+                               for p in drawn_before],
             'transit_after': [(*to_m.transform(p["lon"], p["lat"]), p["name"])
-                              for p in after if p["lat"] is not None],
+                              for p in drawn_after],
             'meta': {
                 'area_name': area_name,
                 'lines': len(segments),
@@ -2814,10 +3006,10 @@ class FlightPlannerGUI(tk.Tk):
                 ).add_to(waypoint_layer)
             waypoint_layer.add_to(survey_map)
 
-            if mapped_before or mapped_after:
+            if drawn_before or drawn_after:
                 transit_layer = folium.FeatureGroup(name='Transit legs')
-                for chain, anchor, leads in ((mapped_before, pattern_latlon[0], True),
-                                             (mapped_after, pattern_latlon[-1], False)):
+                for chain, anchor, leads in ((drawn_before, pattern_latlon[0], True),
+                                             (drawn_after, pattern_latlon[-1], False)):
                     if not chain:
                         continue
                     points = [(p["lat"], p["lon"]) for p in chain]
@@ -2862,12 +3054,13 @@ class FlightPlannerGUI(tk.Tk):
             f"{len(waypoints)} waypoints"
             f"{f' (OVER {MAX_FMS_WAYPOINTS} LIMIT)' if over_limit else ''}"
             f"{' [survey box only]' if survey_only else ''}, {dist_nm:.1f} nm, "
+            f"pattern {format_minutes(time_min)}, total {format_minutes(total_min)}, "
             f"{clearance_m/1000:.2f} km padding{' (SHORT — check offsets)' if short else ''}. "
             f"Send {os.path.basename(pack_file)} to the pilot."
         )
 
     def _export_csv_files(self, flown_segments, conversion_func, area_name, line_prefix, out_dir,
-                          before=(), after=(), lead_xy=None, line_numbers=None):
+                          before=(), after=(), lead_xy=None, line_numbers=None, axis=None):
         """Write both flight-plan CSVs in the exact formats the pilot supplied samples for.
 
         Waypoints are named per survey line as <prefix>L<n>S / <prefix>L<n>F -- Start and
@@ -2892,7 +3085,7 @@ class FlightPlannerGUI(tk.Tk):
         for segment, line in zip(flown_segments, line_numbers):
             ends = conversion_func([segment.coords[0], segment.coords[-1]])
             (start_lat, start_lon), (end_lat, end_lon) = ends
-            start_end, finish_end = line_end_labels(segment)
+            start_end, finish_end = line_end_labels(segment, axis)
             survey.append((f"{line_prefix}{start_end}L{line:0{digits}d}", start_lat, start_lon))
             survey.append((f"{line_prefix}{finish_end}L{line:0{digits}d}", end_lat, end_lon))
 

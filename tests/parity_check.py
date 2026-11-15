@@ -41,7 +41,7 @@ def plan(name, params=None, **flags):
     base = {
         "schema": "airborne_survey_plan/1", "area_name": name, "waypoint_prefix": "",
         "parameters": {
-            "groundspeed_kt": "200", "bank_angle_deg": "25", "swath_width_km": "4.0", "swath_overlap": "0.1",
+            "groundspeed_kt": "200", "transit_groundspeed_kt": "200", "bank_angle_deg": "25", "swath_width_km": "4.0", "swath_overlap": "0.1",
             "perimeter_margin_km": "5.0", "initial_heading_deg": "0", "lat_offset": "0.0",
             "lon_offset": "0.0", "lead_in_km": "0.0", "origin_airport": "KBOI",
             "destination_airport": "KBOI", "survey_altitude": "200", "center_lat": "43.6475",
@@ -73,6 +73,15 @@ PLANS = [
     plan("skip_box", transit=TRANSIT, skip_box=True),
     plan("no_turn_model", {"bank_angle_deg": "0", "lead_in_km": "5"}, retrace_lines=True),
     plan("wide_turns", {"swath_width_km": "10.0", "bank_angle_deg": "30"}, repeats="2"),
+    plan("airports", {"origin_airport": "KLAX", "destination_airport": "KSLC"}),
+    plan("two_speeds", {"origin_airport": "KLAX", "destination_airport": "KSLC",
+                        "groundspeed_kt": "250", "transit_groundspeed_kt": "450",
+                        "swath_width_km": "1.0"}, transit=TRANSIT),
+    plan("airports_transit", {"origin_airport": "KSLC", "destination_airport": "ZZZZ"},
+         transit=TRANSIT),
+    plan("diagonal_45", {"initial_heading_deg": "45", "swath_width_km": "2.0"}),
+    plan("diagonal_135", {"initial_heading_deg": "135", "swath_width_km": "2.0"},
+         transit=TRANSIT, make_line_bearing="Survey heading"),
     plan("over_limit", {"swath_width_km": "0.75"}, retrace_lines=True, repeats="2"),
 ]
 
@@ -117,8 +126,10 @@ def main():
             if STAMP.sub("T", desktop) != STAMP.sub("T", web["files"][key]["text"].replace("\r\n", "\n")):
                 bad.append(key)
         # The distance, time and turn figures are computed twice too; compare those lines.
-        figures = ("Turn Radius:", "Turns:", "Survey Path:", "Est. Survey Time:", "Segment ",
-                   "Transit Path:", "Total w/ Transit:", "Actual Padding:", "Waypoints in CSV:")
+        figures = ("Turn Radius:", "Turns:", "Survey Path:", "In-Pattern Time:", "Segment ",
+                   "Transit Path:", "Outbound Transit:", "Inbound Transit:", "Transit Time:", "Total Flight Time:", "Actual Padding:",
+                   "Waypoints in CSV:",
+                   "Origin:", "Destination:")
         desktop_stats = [line for line in app.stats_text.get("1.0", "end").splitlines()
                          if line.startswith(figures)]
         web_stats = [line for line in web["summary"].splitlines() if line.startswith(figures)]
