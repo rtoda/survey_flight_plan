@@ -320,6 +320,7 @@ function generate() {
   for (const button of document.querySelectorAll("[data-file]")) button.disabled = false;
   $("save-plan").disabled = false;
   $("toggle-qr").disabled = false;
+  $("open-foreflight").disabled = false;
   drawMap();
   if (!$("qr").hidden) drawQr();
 }
@@ -463,6 +464,15 @@ function drawQr() {
     `(${result.route_url.length} characters).`;
 }
 
+// The browser hands foreflightmobile:// to ForeFlight when it is installed on this device.
+// When it is not, most browsers do nothing at all, so say what to do instead.
+function openInForeFlight() {
+  if (!result) return;
+  window.location.href = result.route_url;
+  setStatus("Opening ForeFlight… If nothing happens, ForeFlight is not installed on this " +
+            "device: use Show QR and scan it with the iPad, or download the content pack.");
+}
+
 function toggleQr() {
   const showing = !$("qr").hidden;
   $("qr").hidden = showing;
@@ -509,6 +519,7 @@ async function main() {
   $("show-labels").addEventListener("change", () => { if (result) drawMap(); });
   $("basemap").addEventListener("change", (event) => setBasemap(event.target.value));
   $("toggle-qr").addEventListener("click", toggleQr);
+  $("open-foreflight").addEventListener("click", openInForeFlight);
   for (const button of document.querySelectorAll("[data-file]")) {
     button.addEventListener("click", () => download(result.files[button.dataset.file]));
   }

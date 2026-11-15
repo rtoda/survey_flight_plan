@@ -1679,6 +1679,16 @@ class FlightPlannerGUI(tk.Tk):
                 "route, origin and destination included — no file transfer needed.\n\n"
                 "Route endpoints and the flight level come from the Origin Airport, "
                 "Destination Airport and Survey Flight Level fields.")
+
+        foreflight_button = ttk.Button(preview_header, text="Open in ForeFlight",
+                                       command=self._open_in_foreflight)
+        foreflight_button.pack(side=tk.RIGHT, padx=(0, 8))
+        ToolTip(foreflight_button,
+                "Open ForeFlight on this computer with the same route the QR code carries: "
+                "origin, transit waypoints, survey waypoints and destination, in order.\n\n"
+                "Needs ForeFlight installed here -- it runs on iPad, iPhone and Apple-silicon "
+                "Macs, not Windows. The route carries positions only; the waypoint names "
+                "travel in the content pack.")
         # View-only toggles: they redraw from cached geometry, they do not recalculate.
         boundary_check = ttk.Checkbutton(preview_header, text="Boundary labels",
                                          variable=self.show_boundary_labels,
@@ -1760,6 +1770,30 @@ class FlightPlannerGUI(tk.Tk):
             messagebox.showinfo("No Map Yet", "Generate a flight plan first.")
             return
         webbrowser.open(Path(self._map_path).absolute().as_uri())
+
+    def _open_in_foreflight(self):
+        """Hand the route link to the operating system, which opens ForeFlight if installed.
+
+        The same foreflightmobile:// link the QR code carries, so the route matches it
+        exactly. Nothing is sent anywhere: the link only names an app on this machine.
+        """
+        if not self._route:
+            messagebox.showinfo("No Route Yet", "Generate a flight plan first.")
+            return
+        url = self._route[1]
+        try:
+            if sys.platform == 'win32':
+                os.startfile(url)
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', url], check=True)
+            else:
+                subprocess.run(['xdg-open', url], check=True)
+        except (OSError, subprocess.CalledProcessError):
+            messagebox.showerror(
+                "ForeFlight Not Found",
+                "Nothing on this computer opens ForeFlight links (foreflightmobile://).\n\n"
+                "ForeFlight runs on iPad, iPhone and Apple-silicon Macs. From here, use Show "
+                "QR and scan it with the iPad camera, or send the content pack.")
 
     def _label(self, x, y, text, anchor="center", fill="#333333", bold=False, avoid=None):
         """Draw canvas text over a white backing box so it stays legible over the pattern.

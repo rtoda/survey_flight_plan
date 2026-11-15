@@ -23,6 +23,7 @@ Inbound Transit 3 min, Total Flight Time 33 min.
 - Exports a KML/KMZ map layer and a ForeFlight content pack for getting the pattern onto an iPad
 - Saves and reloads a whole plan — boundary points and every parameter — as JSON
 - Renders a scannable QR of the ForeFlight route link right in the window (no Pillow needed)
+- **Open in ForeFlight** hands the same route to ForeFlight when it is installed on the device
 - Keeps **Generate Flight Plan & Update Map** and status feedback pinned above the tabs for laptop-height screens
 - Shows flight summary output in a dedicated **Summary** tab for easier access on smaller displays
 - Estimates in-pattern, outbound, inbound and total flight time, with separate survey and
@@ -334,6 +335,12 @@ camera opens the whole survey in ForeFlight as a route, origin and destination i
 no file transfer at all. The endpoints and cruise level come from the **Origin Airport**,
 **Destination Airport** and **Survey Flight Level** fields (200 means FL200, 20,000 ft).
 Drawn directly on the canvas, so Pillow is not required.
+
+**Open in ForeFlight** sends the same route link straight to ForeFlight on the device the
+planner is running on — the web app on an iPad, or either app on an Apple-silicon Mac with
+ForeFlight installed. ForeFlight has no Windows version, so on a PC the desktop app says so
+and the web page does nothing; use **Show QR** there instead. Like the QR, the link carries
+positions only, so the waypoint names reach the iPad through the content pack.
 
 The cruise altitude and speed are stated **once at the end** of the route, in ForeFlight's
 documented `DESTINATION+SPEED+ALTITUDE` form, rather than on every waypoint — the
