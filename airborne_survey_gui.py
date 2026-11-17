@@ -10,9 +10,7 @@ import re
 import subprocess
 import sys
 import time
-import webbrowser
 import zipfile
-from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 import tkinter as tk
 import tkinter.font as tkfont
@@ -34,10 +32,9 @@ def _load_geometry():
     from pyproj import CRS, Transformer
 
 
-# folium is imported lazily inside calculate_and_render's render_map(). It costs ~1.1 s of
-# import on its own -- it pulls in the whole of pandas -- and only the HTML map needs it, so
-# paying for it at module scope delayed every launch. Startup time matters here because the
-# app ships to the pilot as a PyInstaller build. Keep it out of the module header.
+# The window's own preview is the map: it draws a basemap on request. The app used to write
+# a Folium HTML map for the browser as well; that went when the preview gained a basemap,
+# and took a 1.1 s import and a deferred-write queue with it.
 
 # Generated output lives under here, one directory per named plan, so it never litters
 # the project root. Git-ignored wholesale.
@@ -1181,6 +1178,15 @@ class ToolTip:
 
 # --- GUI APPLICATION CLASS ---
 
+# Esri map services behind the preview's Basemap choice. Their export call returns one PNG of
+# exactly the region asked for, already in the preview's own UTM projection, so Tk can draw
+# it as-is: no tiles to stitch, no reprojection, no Pillow.
+BASEMAP_SERVICES = {"Topo": "World_Topo_Map", "Satellite": "World_Imagery"}
+BASEMAP_URL = ("https://server.arcgisonline.com/ArcGIS/rest/services/{service}/MapServer/export"
+               "?bbox={x0},{y0},{x1},{y1}&bboxSR={epsg}&imageSR={epsg}&size={w},{h}"
+               "&format=png24&f=image")
+
+
 class FlightPlannerGUI(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1195,14 +1201,8 @@ class FlightPlannerGUI(tk.Tk):
             (43.635, -116.176, 'Crestline_Trailhead')
         ]
         
-        # Geometry cached for the preview canvas so a window resize can redraw it,
-        # plus the path of the last saved Folium map for the "open in browser" button.
+        # Geometry cached for the preview canvas so a window resize can redraw it.
         self._preview = None
-        self._map_path = None
-        # Closure that writes the Folium map, outstanding until the idle queue runs it,
-        # plus the id of the scheduled callback so it can be cancelled.
-        self._pending_map = None
-        self._map_after_id = None
         self._output_dir = None
         self._run_count = 0
 
@@ -1257,6 +1257,18 @@ class FlightPlannerGUI(tk.Tk):
         self._zoom = None
         self._view = None
         self._drag_origin = None
+        # Armed by a Pick button: (description, callback taking lat and lon as text). The
+        # next plain click on the preview places that point.
+        self._pick = None
+        # Basemap under the preview: off unless asked for, because fetching it tells the
+        # map server where the survey is. _basemap_have is (key, PhotoImage or None) for
+        # the last view fetched, _basemap_want the key being waited for; worker threads
+        # leave their results in _basemap_inbox for the Tk thread to collect.
+        self.basemap = tk.StringVar(value="None")
+        self._basemap_have = None
+        self._basemap_want = None
+        self._basemap_inbox = {}
+        self._basemap_after = None
 
         # Everything below is slow enough to look like a hang, so it happens behind a splash.
         # The window itself stays hidden until there is something worth showing.
@@ -1599,6 +1611,20 @@ class FlightPlannerGUI(tk.Tk):
                 "changes the shape of the survey area, not just the list. Press Generate "
                 "to see the result.")
 
+        boundary_pick_header = ttk.Label(coords_tab, text="Pick", font=("Helvetica", 9, "bold"))
+        boundary_pick_header.grid(row=0, column=6, padx=2, pady=2)
+        boundary_del_header = ttk.Label(coords_tab, text="Del", font=("Helvetica", 9, "bold"))
+        boundary_del_header.grid(row=0, column=7, padx=2, pady=2)
+        ToolTip(boundary_del_header,
+                "✕ removes that point and moves the rows below it up, so no gap is left. "
+                "The plan is regenerated while at least 3 points remain.")
+        ToolTip(boundary_pick_header,
+                "Press ⊕ on a row, then click the preview where that corner of the survey "
+                "area should be. Its latitude and longitude are filled in, Survey Area "
+                "Defined By switches to Boundary GPS, and the plan is regenerated.\n\n"
+                "A basemap is turned on so there is something to click on. Scroll the mouse "
+                "wheel or drag a box to zoom first. Esc cancels.")
+
         self.coord_rows = []
         for i in range(10):
             ttk.Label(coords_tab, text=f"{i+1}").grid(row=i+1, column=0, padx=5, pady=2)
@@ -1612,6 +1638,12 @@ class FlightPlannerGUI(tk.Tk):
             
             self.coord_rows.append((lat_entry, lon_entry, lbl_entry))
             self._add_row_movers(coords_tab, self.coord_rows, i, i + 1, 4)
+            ttk.Button(coords_tab, text="⊕", width=2,
+                       command=lambda n=i: self._pick_boundary(n)).grid(
+                row=i + 1, column=6, padx=(4, 1))
+            ttk.Button(coords_tab, text="✕", width=2,
+                       command=lambda n=i: self._delete_row(self.coord_rows, n, True)).grid(
+                row=i + 1, column=7, padx=(1, 1))
 
         # Clear Coordinates Button
         clear_btn = ttk.Button(coords_tab, text="Clear All GPS Fields", command=self._clear_gps_fields)
@@ -1638,6 +1670,17 @@ class FlightPlannerGUI(tk.Tk):
             entry.insert(0, default_val)
             entry.grid(row=row, column=1, sticky="w", pady=5, padx=10)
             self.inputs[key] = entry
+
+        pick_centre = ttk.Button(center_tab, text="⊕ Pick Centre on Preview",
+                                 command=self._pick_centre)
+        pick_centre.grid(row=len(center_fields) + 1, column=0, columnspan=2, sticky="w",
+                         pady=(10, 0))
+        ToolTip(pick_centre,
+                "Then click the preview where the centre of the rectangle should be. The "
+                "latitude and longitude above are filled in, Survey Area Defined By switches "
+                "to CenterPoint, and the plan is regenerated.\n\n"
+                "A basemap is turned on so there is something to click on. Scroll the mouse "
+                "wheel or drag a box to zoom first. Esc cancels.")
 
         # TAB 4: TRANSIT WAYPOINTS, BEFORE AND AFTER THE SURVEY BOX
         transit_tab = ttk.Frame(notebook, padding=10)
@@ -1680,6 +1723,21 @@ class FlightPlannerGUI(tk.Tk):
                     "slotted between two filled rows.\n\n"
                     "Rows are flown top to bottom, so this sets the order of the transit "
                     "legs. Press Generate to rebuild the route.")
+            pick_header = ttk.Label(transit_tab, text="Pick", font=("Helvetica", 9, "bold"))
+            pick_header.grid(row=row_cursor, column=8, padx=2, pady=2)
+            del_header = ttk.Label(transit_tab, text="Del", font=("Helvetica", 9, "bold"))
+            del_header.grid(row=row_cursor, column=9, padx=2, pady=2)
+            ToolTip(del_header,
+                    "✕ removes that waypoint and moves the rows below it up, so no gap is "
+                    "left. The plan is regenerated.")
+            ToolTip(pick_header,
+                    "Press ⊕ on a row, then click the preview where that waypoint should "
+                    "be. Its latitude and longitude are filled in (an identifier on the row "
+                    "is cleared, since a row takes one or the other) and the plan is "
+                    "regenerated.\n\n"
+                    "A basemap is turned on so there is something to click on. Scroll the "
+                    "mouse wheel or drag a box to zoom first -- scroll out to reach places "
+                    "beyond the pattern. Esc cancels.")
             row_cursor += 1
 
             rows = []
@@ -1698,6 +1756,12 @@ class FlightPlannerGUI(tk.Tk):
                     row=row_cursor, column=5, padx=2, pady=2)
                 rows.append((ident, lat, lon, label, make_line))
                 self._add_row_movers(transit_tab, rows, i, row_cursor, 6)
+                ttk.Button(transit_tab, text="⊕", width=2,
+                           command=lambda g=group, n=i: self._pick_transit(g, n)).grid(
+                    row=row_cursor, column=8, padx=(4, 1))
+                ttk.Button(transit_tab, text="✕", width=2,
+                           command=lambda r=rows, n=i: self._delete_row(r, n)).grid(
+                    row=row_cursor, column=9, padx=(1, 1))
                 row_cursor += 1
             self.transit_rows[group] = rows
 
@@ -1800,10 +1864,27 @@ class FlightPlannerGUI(tk.Tk):
         preview_header = ttk.Frame(right_frame, padding=(8, 6))
         preview_header.pack(fill=tk.X)
         ttk.Label(preview_header, text="Flight Path Preview", font=("Helvetica", 10, "bold")).pack(side=tk.LEFT)
-        ttk.Button(preview_header, text="Open Map in Browser",
-                   command=self._open_map_in_browser).pack(side=tk.RIGHT)
+        # View options get their own row: the buttons above already fill the first.
+        preview_tools = ttk.Frame(right_frame, padding=(8, 0, 8, 6))
+        preview_tools.pack(fill=tk.X)
+        basemap_label = ttk.Label(preview_tools, text="Basemap:")
+        basemap_label.pack(side=tk.LEFT)
+        basemap_box = ttk.Combobox(preview_tools, width=10, state="readonly",
+                                   values=("None", "Topo", "Satellite"),
+                                   textvariable=self.basemap)
+        basemap_box.pack(side=tk.LEFT, padx=(6, 18))
+        basemap_box.bind("<<ComboboxSelected>>", lambda _e: self._draw_preview())
+        basemap_tip = (
+            "Draw a map under the preview: Topo or Satellite, from Esri.\n\n"
+            "None by default, because showing a map means asking Esri's server for a "
+            "picture of the area, which tells it where the survey is. Nothing else in this "
+            "app goes online. The Pick buttons turn Topo on, since a click needs something "
+            "to aim at.\n\n"
+            "Needs an internet connection. Display only: never changes the exported files.")
+        ToolTip(basemap_label, basemap_tip)
+        ToolTip(basemap_box, basemap_tip)
         ttk.Button(preview_header, text="Show Export Files",
-                   command=self._open_export_folder).pack(side=tk.RIGHT, padx=(0, 8))
+                   command=self._open_export_folder).pack(side=tk.RIGHT)
         self.zoom_button = ttk.Button(preview_header, text="Reset Zoom", width=11,
                                       command=self._reset_zoom)
         self.zoom_button.state(["disabled"])
@@ -1835,20 +1916,20 @@ class FlightPlannerGUI(tk.Tk):
                 "Macs, not Windows. The route carries positions only; the waypoint names "
                 "travel in the content pack.")
         # View-only toggles: they redraw from cached geometry, they do not recalculate.
-        boundary_check = ttk.Checkbutton(preview_header, text="Boundary labels",
+        boundary_check = ttk.Checkbutton(preview_tools, text="Boundary labels",
                                          variable=self.show_boundary_labels,
                                          command=self._draw_preview)
-        boundary_check.pack(side=tk.RIGHT, padx=(0, 14))
         ToolTip(boundary_check,
                 "Show the names of your own boundary points — the purple markers.\n\n"
                 "These are usually the longest labels, so they crowd the pane first. The "
                 "markers stay visible either way.\n\n"
                 "Display only: never changes the exported files.")
 
-        waypoint_check = ttk.Checkbutton(preview_header, text="Waypoint labels",
+        waypoint_check = ttk.Checkbutton(preview_tools, text="Waypoint labels",
                                          variable=self.show_waypoint_labels,
                                          command=self._draw_preview)
-        waypoint_check.pack(side=tk.RIGHT, padx=(0, 14))
+        waypoint_check.pack(side=tk.LEFT, padx=(0, 14))
+        boundary_check.pack(side=tk.LEFT, padx=(0, 14))
         ToolTip(waypoint_check,
                 "Show the exported waypoint names (1L1S, 1L1F, …) at each line end, so the "
                 "preview can be read against the CSVs.\n\n"
@@ -1865,56 +1946,18 @@ class FlightPlannerGUI(tk.Tk):
         # Button-2 as well as 3: right-click is the middle button number on some macOS setups.
         for sequence in ("<Button-3>", "<Button-2>"):
             self.preview_canvas.bind(sequence, self._reset_zoom)
-
-    def _cancel_map_callback(self):
-        """Drop any queued _flush_map, without touching the pending closure itself.
-
-        A callback left in Tk's queue when the window goes away fires against a command
-        that no longer exists, which Tcl reports on stderr as an invalid command name.
-        """
-        if self._map_after_id is not None:
-            try:
-                self.after_cancel(self._map_after_id)
-            except Exception:
-                pass
-            self._map_after_id = None
-
-    def _flush_map(self):
-        """Write the deferred Folium map if one is outstanding.
-
-        Runs off the idle queue after a calculation, and synchronously from anything that
-        needs the file to exist. The pending closure is cleared *before* it runs, so a
-        failure reports once rather than being retried by the next caller.
-        """
-        self._cancel_map_callback()
-        render, self._pending_map = self._pending_map, None
-        if render is None:
-            return
-        try:
-            render()
-        except Exception as err:
-            messagebox.showerror("Map Not Written", f"{self._map_path}\n\n{err}")
+        # Wheel zoom, which unlike the drag box can also zoom OUT -- needed to click a
+        # waypoint position beyond the pattern. Button-4/5 are the wheel on X11.
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.preview_canvas.bind(sequence, self._on_wheel)
+        self.bind("<Escape>", self._cancel_pick)
 
     def destroy(self):
-        """Settle the deferred map before the window goes away.
-
-        The idle callback is dropped on exit, so quitting straight after a run would leave
-        the plan folder one file short of what it advertises. Costs nothing in the normal
-        case, where the queue has long since drained.
-        """
-        try:
-            self._flush_map()
-        except Exception:
-            pass                          # never let a map failure block the window closing
+        """Drop the queued basemap callback, which would otherwise fire at a dead window."""
+        if self._basemap_after:
+            self.after_cancel(self._basemap_after)
+            self._basemap_after = None
         super().destroy()
-
-    def _open_map_in_browser(self):
-        # The map may still be queued; the click is exactly the moment to pay for it.
-        self._flush_map()
-        if not self._map_path or not os.path.exists(self._map_path):
-            messagebox.showinfo("No Map Yet", "Generate a flight plan first.")
-            return
-        webbrowser.open(Path(self._map_path).absolute().as_uri())
 
     def _first_line_options(self):
         """[(code, label), ...] for the First Line box at the heading currently typed."""
@@ -2031,21 +2074,188 @@ class FlightPlannerGUI(tk.Tk):
         x0, y0 = self._drag_origin
         self._drag_origin = None
         self.preview_canvas.delete("zoombox")
-        # A click, or a twitch while clicking, is not a zoom request.
+        # A click, or a twitch while clicking, is not a zoom request -- but it is where an
+        # armed Pick button wants its point.
         if abs(event.x - x0) < 12 or abs(event.y - y0) < 12:
+            if self._pick:
+                self._finish_pick(event.x, event.y)
             return
         self._zoom = self._pixels_to_region(x0, y0, event.x, event.y)
         self._update_zoom_controls()
         self._draw_preview()
 
+    def _pixel_to_map(self, px, py):
+        """A canvas pixel as map metres, using the view the preview was last drawn with."""
+        view = self._view
+        return (view['min_x'] + (px - view['off_x']) / view['scale'],
+                view['min_y'] + (view['base_y'] - py) / view['scale'])
+
+    def _on_wheel(self, event):
+        """Zoom the preview in or out about the pointer, one notch per wheel click."""
+        if self.showing_qr or not self._view:
+            return
+        zoom_in = event.delta > 0 or getattr(event, 'num', 0) == 4
+        factor = 0.8 if zoom_in else 1.25
+        view = self._view
+        # The region on screen now: the drawing area, which the pattern is centred in.
+        half_w = view['avail_w'] / view['scale'] / 2.0
+        half_h = view['avail_h'] / view['scale'] / 2.0
+        mid_x, mid_y = self._pixel_to_map(self.preview_canvas.winfo_width() / 2.0,
+                                          view['pad_top'] + view['avail_h'] / 2.0)
+        cx, cy = self._pixel_to_map(event.x, event.y)
+        # Scale about the pointer, so what is under it stays under it. Stop at 50 m and
+        # 5000 km across: past either the picture says nothing.
+        if not 25.0 < half_w * factor < 2.5e6:
+            return
+        self._zoom = (cx + (mid_x - half_w - cx) * factor, cy + (mid_y - half_h - cy) * factor,
+                      cx + (mid_x + half_w - cx) * factor, cy + (mid_y + half_h - cy) * factor)
+        self._update_zoom_controls()
+        self._draw_preview()
+
+    # --- PICK ON PREVIEW -------------------------------------------------------------
+
+    def _begin_pick(self, description, apply):
+        """Arm the preview: the next plain click hands its position to `apply(lat, lon)`."""
+        if not self._preview:
+            messagebox.showinfo("Nothing to Click On Yet",
+                                "Generate a flight plan first, so the preview has a map to "
+                                "click on.")
+            return
+        if self.showing_qr:
+            self._toggle_qr()
+        self._pick = (description, apply)
+        self.preview_canvas.configure(cursor="crosshair")
+        note = ""
+        if self.basemap.get() not in BASEMAP_SERVICES:
+            # A click on a blank preview can only be aimed against the pattern itself.
+            self.basemap.set("Topo")
+            self._draw_preview()
+            note = " Basemap turned on (from Esri)."
+        self.status_var.set(f"Click the preview to place {description}. Scroll or drag a box "
+                            f"to zoom first; Esc cancels.{note}")
+
+    def _cancel_pick(self, _event=None):
+        if self._pick:
+            self._pick = None
+            self.preview_canvas.configure(cursor="")
+            self.status_var.set("Pick cancelled.")
+
+    def _finish_pick(self, px, py):
+        _description, apply = self._pick
+        self._pick = None
+        self.preview_canvas.configure(cursor="")
+        lat, lon = self._preview['to_latlon'](*self._pixel_to_map(px, py))
+        # 5 decimals is about a metre, far finer than a click on this preview can aim.
+        apply(f"{lat:.5f}", f"{lon:.5f}")
+        self.calculate_and_render()
+
+    @staticmethod
+    def _set_entry(entry, text):
+        entry.delete(0, tk.END)
+        entry.insert(0, text)
+
+    def _pick_transit(self, group, index):
+        ident, lat_entry, lon_entry = self.transit_rows[group][index][:3]
+
+        def apply(lat, lon):
+            # A row is an identifier OR a position; the click means the position.
+            self._set_entry(ident, "")
+            self._set_entry(lat_entry, lat)
+            self._set_entry(lon_entry, lon)
+
+        self._begin_pick(f"waypoint {index + 1} {group} the survey box", apply)
+
+    def _pick_boundary(self, index):
+        lat_entry, lon_entry = self.coord_rows[index][:2]
+
+        def apply(lat, lon):
+            self._set_entry(lat_entry, lat)
+            self._set_entry(lon_entry, lon)
+            self.survey_area_mode.set("Boundary GPS (Max 10)")
+
+        self._begin_pick(f"boundary point {index + 1}", apply)
+
+    # --- BASEMAP ---------------------------------------------------------------------
+
+    def _basemap_image(self, width, height):
+        """The basemap for the view just laid out, or None while it is off or on its way.
+
+        Asks for it when it is not in hand. The request waits a moment first, so a window
+        being resized or a wheel being spun sends one request, not one per redraw.
+        """
+        service = BASEMAP_SERVICES.get(self.basemap.get())
+        if not service or not self._preview or not self._view:
+            return None
+        x0, y1 = self._pixel_to_map(0, 0)
+        x1, y0 = self._pixel_to_map(width, height)
+        key = (service, self._preview['epsg'], round(x0), round(y0), round(x1), round(y1),
+               width, height)
+        if self._basemap_have and self._basemap_have[0] == key:
+            return self._basemap_have[1]
+        if key != self._basemap_want:
+            self._basemap_want = key
+            if self._basemap_after:
+                self.after_cancel(self._basemap_after)
+            self._basemap_after = self.after(350, lambda: self._fetch_basemap(key))
+        return None
+
+    def _fetch_basemap(self, key):
+        """Download one basemap picture off the Tk thread, then collect it by polling."""
+        import threading
+        service, epsg, x0, y0, x1, y1, width, height = key
+        url = BASEMAP_URL.format(service=service, epsg=epsg, x0=x0, y0=y0, x1=x1, y1=y1,
+                                 w=width, h=height)
+        inbox = self._basemap_inbox
+
+        def work():
+            try:
+                import urllib.request
+                request = urllib.request.Request(url, headers={"User-Agent": "survey-flight-planner"})
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    data = response.read()
+                if not data.startswith(b"\x89PNG"):
+                    raise ValueError("the map server did not return a picture")
+                inbox[key] = (data, None)
+            except Exception as err:        # offline, blocked, timed out: the preview carries on
+                inbox[key] = (None, str(err))
+
+        threading.Thread(target=work, daemon=True).start()
+        self._poll_basemap()
+
+    def _poll_basemap(self):
+        self._basemap_after = None
+        key = self._basemap_want
+        if key not in self._basemap_inbox:
+            self._basemap_after = self.after(100, self._poll_basemap)
+            return
+        data, error = self._basemap_inbox.pop(key)
+        self._basemap_inbox.clear()         # anything else in there is for a view long gone
+        image = None
+        if data is not None:
+            import base64
+            try:
+                image = tk.PhotoImage(data=base64.b64encode(data))
+            except tk.TclError as err:
+                error = str(err)
+        # Kept even when it failed, so the same view is not asked for again on every redraw.
+        self._basemap_have = (key, image)
+        if image is None:
+            self.status_var.set(f"Basemap not loaded ({error}). Check the internet "
+                                f"connection; the preview works without it.")
+        self._draw_preview()
+
+    def _pick_centre(self):
+        def apply(lat, lon):
+            self._set_entry(self.inputs["center_lat"], lat)
+            self._set_entry(self.inputs["center_lon"], lon)
+            self.survey_area_mode.set("CenterPoint")
+
+        self._begin_pick("the centre point", apply)
+
     def _pixels_to_region(self, x0, y0, x1, y1):
         """Turn a dragged pixel rectangle into a map region, in metres."""
         view = self._view
-
-        def to_map(px, py):
-            return (view['min_x'] + (px - view['off_x']) / view['scale'],
-                    view['min_y'] + (view['base_y'] - py) / view['scale'])
-
+        to_map = self._pixel_to_map
         (ax, ay), (bx, by) = to_map(x0, y0), to_map(x1, y1)
         min_x, max_x = sorted((ax, bx))
         min_y, max_y = sorted((ay, by))
@@ -2202,7 +2412,31 @@ class FlightPlannerGUI(tk.Tk):
 
         # Cached so a dragged pixel rectangle can be converted back into map metres.
         self._view = {'min_x': min_x, 'min_y': min_y, 'scale': scale, 'off_x': off_x,
-                      'base_y': base_y, 'avail_w': avail_w, 'avail_h': avail_h}
+                      'base_y': base_y, 'avail_w': avail_w, 'avail_h': avail_h,
+                      'pad_top': pad_top}
+
+        # With a basemap chosen the envelope is drawn as an outline only, so the map shows
+        # through it, and the legend, scale bar and north arrow get white backing.
+        basemap_on = self.basemap.get() in BASEMAP_SERVICES
+        basemap = self._basemap_image(width, height)
+        if basemap is not None:
+            canvas.create_image(0, 0, anchor="nw", image=basemap)
+
+        def last_item():
+            # The newest item, by id: stacking order stops matching it once a backing box
+            # has been slipped underneath its group.
+            return max(canvas.find_all(), default=0)
+
+        def backing(after_item):
+            """White box behind everything drawn since `after_item`, when over a basemap."""
+            items = [i for i in canvas.find_all() if i > after_item]
+            if not basemap_on or not items:
+                return
+            boxes = [canvas.bbox(i) for i in items]
+            box = canvas.create_rectangle(min(b[0] for b in boxes) - 5, min(b[1] for b in boxes) - 3,
+                                          max(b[2] for b in boxes) + 5, max(b[3] for b in boxes) + 3,
+                                          fill="white", outline="")
+            canvas.tag_lower(box, min(items))
 
         def to_px(point):
             return (off_x + (point[0] - min_x) * scale,
@@ -2212,7 +2446,8 @@ class FlightPlannerGUI(tk.Tk):
         # an empty coordinate list raises rather than drawing nothing.
         if rect:
             rect_px = [coord for point in rect for coord in to_px(point)]
-            canvas.create_polygon(rect_px, fill="#eaf1fb", outline="#1f6fd0", width=2)
+            canvas.create_polygon(rect_px, fill="" if basemap_on else "#eaf1fb",
+                                  outline="#1f6fd0", width=2)
 
         # Transit legs, drawn under the survey track so the survey stays dominant
         if track:
@@ -2289,23 +2524,30 @@ class FlightPlannerGUI(tk.Tk):
 
         # North arrow (UTM grid north is up); kept low-right, clear of the header text
         nx, ny = width - 34, height - 58
+        mark = last_item()
         canvas.create_line(nx, ny + 16, nx, ny - 12, fill="#333333", width=2,
                            arrow=tk.LAST, arrowshape=(10, 12, 4))
         canvas.create_text(nx, ny + 27, text="N", fill="#333333", font=("Helvetica", 9, "bold"))
+        backing(mark)
+        if basemap is not None:
+            self._label(width - 8, height - 9, "Basemap © Esri", anchor="e", fill="#555555")
 
         # Scale bar
         bar_km = next((km for km in (1, 2, 5, 10, 20, 25, 50, 100, 200, 500)
                        if km * 1000 * scale >= (width - 2 * pad) * 0.25), 500)
         bar_px = bar_km * 1000 * scale
         bx, by = pad, height - 24
+        mark = last_item()
         canvas.create_line(bx, by, bx + bar_px, by, fill="#333333", width=3)
         for end_x in (bx, bx + bar_px):
             canvas.create_line(end_x, by - 5, end_x, by + 5, fill="#333333", width=2)
         canvas.create_text(bx + bar_px / 2, by - 13, text=f"{bar_km} km", fill="#333333",
                            font=("Helvetica", 9))
+        backing(mark)
 
         # Header / legend
         meta = self._preview['meta']
+        mark = last_item()
         canvas.create_text(pad, 20, anchor="w", fill="#222222", font=("Helvetica", 10, "bold"),
                            text=f"{meta['area_name']}  —  {meta['lines']} survey lines @ "
                                 f"{meta['heading']:.0f}°T  —  {meta['dist_nm']:.1f} nm / "
@@ -2319,16 +2561,19 @@ class FlightPlannerGUI(tk.Tk):
                   ("#7b2fbe", "Boundary waypoints")]
         if transit_before or transit_after:
             legend.append(("#8a8a8a", "Transit legs to and from the box"))
-        canvas.create_text(width - pad, 20, anchor="e",
-                           fill="#a06000" if self._zoom else "#999999",
-                           font=("Helvetica", 8, "bold" if self._zoom else "normal"),
-                           text="ZOOMED — right-click to reset" if self._zoom
-                                else "drag a box to zoom")
         for row, (color, text) in enumerate(legend):
             ly = legend_top + row * 16
             canvas.create_line(pad, ly, pad + 18, ly, fill=color, width=3)
             canvas.create_text(pad + 24, ly, anchor="w", text=text, fill="#555555",
                                font=("Helvetica", 8))
+        backing(mark)
+        mark = last_item()
+        canvas.create_text(width - pad, 20, anchor="e",
+                           fill="#a06000" if self._zoom else "#999999",
+                           font=("Helvetica", 8, "bold" if self._zoom else "normal"),
+                           text="ZOOMED — right-click to reset" if self._zoom
+                                else "scroll or drag a box to zoom")
+        backing(mark)
 
     def _load_defaults(self):
         # Pre-populate fields with default Clairmont Fire Coordinates
@@ -2364,6 +2609,38 @@ class FlightPlannerGUI(tk.Tk):
             here.insert(0, theirs)
             there.delete(0, tk.END)
             there.insert(0, mine)
+
+    @staticmethod
+    def _row_values(row):
+        return [widget.get() for widget in row]
+
+    @staticmethod
+    def _set_row_values(row, values):
+        for widget, value in zip(row, values):
+            # The make-line flag is a BooleanVar sitting in the same tuple as the Entries.
+            if isinstance(widget, tk.Variable):
+                widget.set(value)
+            else:
+                widget.delete(0, tk.END)
+                widget.insert(0, value)
+
+    def _delete_row(self, rows, index, is_boundary=False):
+        """Remove one grid row and close the gap by moving the rows below it up."""
+        values = [self._row_values(row) for row in rows]
+        if not any(values[index][:-1] if not is_boundary else values[index]):
+            return                            # already empty: nothing to remove
+        blank = ["" if isinstance(v, str) else False for v in values[index]]
+        for row, new in zip(rows[index:], values[index + 1:] + [blank]):
+            self._set_row_values(row, new)
+        if is_boundary:
+            left = sum(1 for lat, lon, _label in rows if lat.get().strip() or lon.get().strip())
+            # Fewer than 3 corners is not an area; say so here rather than through the
+            # error dialog a regenerate would raise.
+            if left < 3 and self.survey_area_mode.get() != "CenterPoint":
+                self.status_var.set(f"Boundary point deleted. {left} left -- at least 3 are "
+                                    f"needed to generate.")
+                return
+        self.calculate_and_render()
 
     def _add_row_movers(self, parent, rows, index, grid_row, first_col):
         """Up/down buttons for one row of a coordinate grid."""
@@ -3142,6 +3419,9 @@ class FlightPlannerGUI(tk.Tk):
 
         # 9. Refresh the in-window preview (UTM metres, matching the geometry engine)
         self._preview = {
+            # Back from preview metres to (lat, lon), for the Pick buttons.
+            'to_latlon': lambda x, y: to_geo.transform(x, y)[::-1],
+            'epsg': epsg_code,      # the projection those metres are in, for the basemap
             'rect': list(survey_poly.exterior.coords) if survey_poly else [],
             'track': list(flown_track),
             'marks': [] if self.survey_area_mode.get() == "CenterPoint"
@@ -3167,104 +3447,14 @@ class FlightPlannerGUI(tk.Tk):
         }
         self._draw_preview()
 
-        # 10. The Folium map is the slowest thing in a run: folium alone is ~1.1 s of
-        # import because it drags in pandas, and the map is only ever read through the
-        # browser button. Import and build are both deferred to the idle queue so the
-        # window paints first. Anything needing the file on disk calls _flush_map().
-        self._map_path = os.path.join(out_dir, f"{area_name}_flight_path.html")
-
-        def render_map():
-            import folium
-
-            # The map is opened straight from disk (file://), so the browser sends no Referer.
-            # OpenStreetMap's tile servers answer that with "403 Access blocked", which is why
-            # the stock basemap came up as a wall of error tiles. Esri's and CARTO's tiles have
-            # no such rule, so they carry the map; OSM stays selectable but is not the default.
-            survey_map = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=None)
-            folium.TileLayer(
-                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
-                attr='Tiles &copy; Esri', name='Esri topo', max_zoom=19).add_to(survey_map)
-            folium.TileLayer(
-                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                attr='Tiles &copy; Esri', name='Esri satellite', max_zoom=19, show=False).add_to(survey_map)
-            folium.TileLayer('cartodbpositron', name='CARTO light', show=False).add_to(survey_map)
-            folium.TileLayer('openstreetmap', name='OpenStreetMap (may be blocked)', show=False).add_to(survey_map)
-
-            # Colours match the canvas preview so the two views read the same way. Each group
-            # is its own FeatureGroup, so LayerControl can switch it off -- the only sane way
-            # to cope with a dense survey putting 50+ markers on the map.
-            if survey_poly is not None:
-                hull_latlon = xy_to_latlon(list(survey_poly.exterior.coords))
-                folium.PolyLine(hull_latlon, color='#1f6fd0', weight=3, opacity=0.7,
-                                tooltip='Target buffer envelope').add_to(survey_map)
-
-            pattern_latlon = xy_to_latlon(list(flown_track))
-            folium.PolyLine(pattern_latlon, color='#d81b1b', weight=4, opacity=0.9,
-                            dash_array='5, 6', tooltip='Survey flight track').add_to(survey_map)
-
-            if self.survey_area_mode.get() != "CenterPoint":
-                boundary_layer = folium.FeatureGroup(name='Boundary points')
-                for point in survey_boundary:
-                    lat, lon, wp_name = point[0], point[1], point[2]
-                    folium.Marker(
-                        location=[lat, lon],
-                        popup=f"{wp_name}: ({lat:.5f}, {lon:.5f})",
-                        tooltip=wp_name,
-                        icon=folium.Icon(color='purple', icon='info-sign')
-                    ).add_to(boundary_layer)
-                boundary_layer.add_to(survey_map)
-
-            # Labels ride along permanently while there are few enough to read; past that they
-            # would be an unreadable mat, so they fall back to hover.
-            label_always = len(survey_waypoints) <= 24
-            waypoint_layer = folium.FeatureGroup(name='Survey waypoints')
-            for name, lat, lon in survey_waypoints:
-                folium.CircleMarker(
-                    location=[lat, lon], radius=4, color='#d81b1b', weight=1,
-                    fill=True, fill_color='#d81b1b', fill_opacity=0.9,
-                    tooltip=folium.Tooltip(name, permanent=label_always, direction='right'),
-                    popup=f"{name}<br>{lat:.6f}, {lon:.6f}",
-                ).add_to(waypoint_layer)
-            waypoint_layer.add_to(survey_map)
-
-            if drawn_before or drawn_after:
-                transit_layer = folium.FeatureGroup(name='Transit legs')
-                for chain, anchor, leads in ((drawn_before, pattern_latlon[0], True),
-                                             (drawn_after, pattern_latlon[-1], False)):
-                    if not chain:
-                        continue
-                    points = [(p["lat"], p["lon"]) for p in chain]
-                    leg = points + [anchor] if leads else [anchor] + points
-                    folium.PolyLine(leg, color='#8a8a8a', weight=3, opacity=0.9,
-                                    dash_array='2, 8',
-                                    tooltip='Transit to the box' if leads
-                                            else 'Transit from the box').add_to(transit_layer)
-                    for p in chain:
-                        folium.CircleMarker(
-                            location=[p["lat"], p["lon"]], radius=5, color='#444444', weight=2,
-                            fill=True, fill_color='#8a8a8a', fill_opacity=0.9,
-                            tooltip=folium.Tooltip(p["name"], permanent=True, direction='right'),
-                            popup=f"{p['name']}<br>{p['lat']:.6f}, {p['lon']:.6f}",
-                        ).add_to(transit_layer)
-                transit_layer.add_to(survey_map)
-
-            folium.LayerControl(collapsed=False).add_to(survey_map)
-
-            # 11. Save the interactive map for the browser button (Leaflet needs a real browser)
-            survey_map.save(self._map_path)
-
-        # Drop the previous run's file before queuing this one. Everything else here is
-        # written synchronously, so a leftover HTML would sit next to fresh CSVs looking
-        # current while describing the last run -- silently wrong beats loudly absent, so
-        # a reader that gets in before the idle callback finds nothing rather than a lie.
-        if os.path.exists(self._map_path):
+        # Earlier versions wrote a Folium map here. One left over from then would sit beside
+        # fresh CSVs looking current while describing an old run, so clear it out.
+        stale_map = os.path.join(out_dir, f"{area_name}_flight_path.html")
+        if os.path.exists(stale_map):
             try:
-                os.remove(self._map_path)
+                os.remove(stale_map)
             except OSError:
-                pass                      # still open in a browser; render_map overwrites it
-        self._pending_map = render_map
-        self._cancel_map_callback()          # supersede the previous run's, if it is queued
-        self._map_after_id = self.after_idle(self._flush_map)
+                pass                      # still open in a browser; harmless
 
         self._run_count += 1
         short = clearance_m < margin * 1000.0 - 1.0
@@ -3406,8 +3596,6 @@ class FlightPlannerGUI(tk.Tk):
 
     def _open_export_folder(self):
         """Reveal the output directory so the files can be AirDropped or attached."""
-        # Finish the deferred map first, or the folder opens a file short of what it lists.
-        self._flush_map()
         folder = self._output_dir or os.getcwd()
         try:
             if sys.platform == 'win32':

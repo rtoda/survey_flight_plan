@@ -19,7 +19,7 @@ Inbound Transit 3 min, Total Flight Time 33 min.
 - Generates an optimized rectangular survey pattern based on swath width, overlap, heading, and margins
 - Exports two CSV formats: ForeFlight-friendly and Honeywell-friendly
 - Draws a scaled flight-path preview directly in the window (native Tk canvas — no browser engine needed)
-- Saves an interactive Folium HTML map, opened on demand via **Open Map in Browser**
+- Optional Esri basemap under the preview, and click-to-place for boundary points, waypoints and the centre point
 - Exports a KML/KMZ map layer and a ForeFlight content pack for getting the pattern onto an iPad
 - Saves and reloads a whole plan — boundary points and every parameter — as JSON
 - Renders a scannable QR of the ForeFlight route link right in the window (no Pillow needed)
@@ -44,8 +44,7 @@ the desktop app.
 - **What it loads from elsewhere:** the Python runtime from jsDelivr and two small libraries
   from cdnjs on every visit, and map tiles from Esri only if the visitor turns a basemap on
   (off by default, because tile requests reveal the survey area).
-- **Not in the web version:** the Folium HTML map file (the page's own map replaces it) and
-  drag-to-zoom on the preview (use the map's zoom instead).
+- **Not in the web version:** drag-to-zoom on the preview (use the map's zoom instead).
 
 `web/survey_engine.py` is a GUI-free copy of the desktop app's logic, so a fix to one must be
 made in the other. `python tests/parity_check.py` runs both on the same plans and fails if
@@ -55,7 +54,7 @@ their CSV, KML or route output differs.
 - `web/` — the browser version; see **Web app** above
 - `tests/parity_check.py` — checks the web engine against the desktop app
 - `tools/build_airports.py` — rebuilds `web/airports.csv`, the ICAO airport table
-- `airborne_survey_gui.py` — main GUI (scaled path preview drawn in-window; Folium map opens in a browser)
+- `airborne_survey_gui.py` — main GUI (scaled path preview drawn in-window, with an optional basemap)
 - `notebooks/` — the original exploratory notebooks. Self-contained: they carry their own
   copy of the geometry code and import nothing from the GUI, so fixes to the app do **not**
   reach them. They write into `plans/<AREA>/` like the GUI does.
@@ -333,9 +332,6 @@ git-ignored — it is all regenerable, so nothing there is precious:
 
 - `<AREA>_waypoints_foreflight.csv` — waypoint list in ForeFlight's column order
 - `<AREA>_waypoints_honeywell.csv` — Honeywell FMS formatted CSV
-- `<AREA>_flight_path.html` — Folium map over real terrain, with survey waypoints,
-  transit legs, and (in Boundary mode) boundary points on separate toggleable layers
-  (open with the button, or double-click the file)
 - `<AREA>_survey.kml` / `.kmz` — survey pattern as a ForeFlight **map layer**: AirDrop or
   email it and the lines, buffer and named points display as a toggleable overlay without
   entering the waypoint database
@@ -346,6 +342,26 @@ git-ignored — it is all regenerable, so nothing there is precious:
 - `<AREA>_foreflight_route.txt` — the ForeFlight route string and its `foreflightmobile://`
   link, for pasting into an email
 
+**Pick on the preview.** Typing coordinates is not the only way to place a point. Press
+**⊕** on a row of the Boundary GPS or Waypoints tab, or **Pick Centre on Preview** on the
+CenterPoint tab, then click the preview (the map, in the web app) where the point belongs.
+The latitude and longitude are filled in to 5 decimals and the plan is regenerated; **Esc**
+cancels. Picking a waypoint clears an identifier on that row, since a row is one or the
+other; picking a boundary point or the centre switches **Survey Area Defined By** to match.
+Scroll the mouse wheel out to reach places beyond the pattern.
+
+**✕** on a Boundary GPS or Waypoints row deletes that point and moves the rows below it up,
+so a bad pick is one click to undo. The plan is regenerated, unless that would leave fewer
+than 3 boundary points.
+
+**Basemap** draws a map under the preview — Topo or Satellite, from Esri — so a click has
+something to aim at. It is **None** by default: showing a map means asking Esri's server for
+a picture of the area, which tells it where the survey is, and it is the only thing either
+app sends anywhere. A Pick button turns Topo on when no basemap is showing; set it back to
+None afterwards to stop the requests. It needs an internet connection, and without one the
+preview simply stays blank underneath. Display only — the exported files never change.
+
+**Scroll the mouse wheel** over the preview to zoom in or out about the pointer.
 **Drag a box on the preview** to zoom into it; **right-click** the preview, or press
 **Reset Zoom**, to go back to the full extent. The dragged selection is grown to the pane's
 shape first, so a metre across always reads the same as a metre up and the pattern is never
@@ -397,7 +413,6 @@ including which claims are verified against ForeFlight's docs and which are not.
 - In CenterPoint mode, provide center lat/lon plus positive width and length values.
 - The GUI runs one calculation at startup, so the preview and CSVs already exist before you
   click anything. The status line under the button stamps each run so repeat clicks are visible.
-- Tile-backed maps need real JavaScript; use **Open Map in Browser** for that view.
 - `notebooks/SendToForeFlight.ipynb` does the same route link and QR as the **Show QR**
   button, but standalone against an exported CSV. It calls `make_image()`, so unlike the
   GUI it does need Pillow.

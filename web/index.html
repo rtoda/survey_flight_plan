@@ -46,9 +46,9 @@
     </div>
 
     <div class="tab" id="tab-boundary" hidden>
-      <p class="hint">The corners of the target area, up to 10, in decimal degrees (west and south are negative). At least 3 rows. Used when <b>Survey Area Defined By</b> is set to Boundary GPS.</p>
+      <p class="hint">The corners of the target area, up to 10, in decimal degrees (west and south are negative). At least 3 rows. Used when <b>Survey Area Defined By</b> is set to Boundary GPS. Press <b>⊕</b>, then click the map, to place a corner by eye.</p>
       <table class="grid" id="boundary-table">
-        <thead><tr><th>#</th><th>Latitude</th><th>Longitude</th><th>Label</th><th>Move</th></tr></thead>
+        <thead><tr><th>#</th><th>Latitude</th><th>Longitude</th><th>Label</th><th>Move</th><th title="Press ⊕ on a row, then click the map to place that corner.">Pick</th><th title="✕ removes the row and moves the rows below it up.">Del</th></tr></thead>
         <tbody></tbody>
       </table>
       <button id="clear-boundary">Clear all rows</button>
@@ -57,18 +57,19 @@
     <div class="tab" id="tab-center" hidden>
       <p class="hint">A rectangle around one point. Length follows Initial Heading (deg True); width is perpendicular. Used when <b>Survey Area Defined By</b> is set to CenterPoint.</p>
       <div class="fields" id="center-fields"></div>
+      <p><button id="pick-center" type="button" title="Then click the map where the centre of the rectangle should be. Fills in the latitude and longitude, switches Survey Area Defined By to CenterPoint and regenerates. Turns the basemap on. Esc cancels.">⊕ Pick centre on map</button></p>
     </div>
 
     <div class="tab" id="tab-waypoints" hidden>
-      <p class="hint">Legs flown before reaching the survey box and after leaving it. Each row takes <b>either</b> an identifier (KBOI, BOI, DANDD) <b>or</b> a latitude/longitude pair. Tick <b>Line</b> to fly a short survey line through that waypoint.</p>
+      <p class="hint">Legs flown before reaching the survey box and after leaving it. Each row takes <b>either</b> an identifier (KBOI, BOI, DANDD) <b>or</b> a latitude/longitude pair. Tick <b>Line</b> to fly a short survey line through that waypoint. Press <b>⊕</b>, then click the map, to place a row by eye.</p>
       <h2>Before the survey box</h2>
       <table class="grid" id="before-table">
-        <thead><tr><th>#</th><th>Ident</th><th>Latitude</th><th>Longitude</th><th>Label</th><th>Line</th><th>Move</th></tr></thead>
+        <thead><tr><th>#</th><th>Ident</th><th>Latitude</th><th>Longitude</th><th>Label</th><th>Line</th><th>Move</th><th title="Press ⊕ on a row, then click the map to place that waypoint.">Pick</th><th title="✕ removes the row and moves the rows below it up.">Del</th></tr></thead>
         <tbody></tbody>
       </table>
       <h2>After the survey box</h2>
       <table class="grid" id="after-table">
-        <thead><tr><th>#</th><th>Ident</th><th>Latitude</th><th>Longitude</th><th>Label</th><th>Line</th><th>Move</th></tr></thead>
+        <thead><tr><th>#</th><th>Ident</th><th>Latitude</th><th>Longitude</th><th>Label</th><th>Line</th><th>Move</th><th title="Press ⊕ on a row, then click the map to place that waypoint.">Pick</th><th title="✕ removes the row and moves the rows below it up.">Del</th></tr></thead>
         <tbody></tbody>
       </table>
       <div class="fields" id="line-fields"></div>
@@ -85,7 +86,7 @@
       <strong id="plan-title">Flight path preview</strong>
       <span class="spacer"></span>
       <label><input type="checkbox" id="show-labels" checked> Labels</label>
-      <label title="Off by default. A basemap asks Esri's servers for map tiles of the survey area, which tells them where it is.">Basemap
+      <label title="Off by default. A basemap asks Esri's servers for map tiles of the survey area, which tells them where it is. The ⊕ Pick buttons turn it on, since a click needs a map to aim at.">Basemap
         <select id="basemap">
           <option value="none">None (private)</option>
           <option value="topo">Esri topo</option>
@@ -97,6 +98,10 @@
     </div>
     <div id="view">
       <div id="map"></div>
+      <div id="pick-banner" role="status" hidden>
+        <span id="pick-text"></span>
+        <button id="pick-cancel" type="button">Cancel</button>
+      </div>
       <div id="qr" hidden>
         <canvas id="qr-canvas" width="10" height="10"></canvas>
         <p id="qr-note"></p>
@@ -117,7 +122,8 @@
 <footer>
   Everything is calculated in your browser. The coordinates you type are not sent to any
   server and are kept only in this browser's storage. Turning on a basemap is the one
-  exception: it requests map tiles for the area from Esri.
+  exception: it requests map tiles for the area from Esri. The ⊕ Pick buttons turn the basemap
+  on, because a click needs a map to aim at.
 </footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>

@@ -141,7 +141,9 @@ function textInput(className, placeholder) {
 }
 
 // One grid row. `columns` names the cells in plan-file order; "make_line" is a checkbox.
-function buildRows(tableId, count, columns) {
+// `pick`, when given, adds a pick-on-map button: {what: row number -> description,
+// mode: the Survey Area mode the pick implies, if any}.
+function buildRows(tableId, count, columns, pick) {
   const body = document.querySelector(`#${tableId} tbody`);
   for (let i = 0; i < count; i++) {
     const row = body.insertRow();
@@ -161,6 +163,22 @@ function buildRows(tableId, count, columns) {
       button.addEventListener("click", () => swapRows(body, i, i + delta));
       move.append(button);
     }
+    if (pick) {
+      const button = Object.assign(document.createElement("button"), {
+        type: "button", textContent: "⊕", className: "pick",
+        title: "Then click the map to place this point. Turns the basemap on. Esc cancels." });
+      button.addEventListener("click", () => beginPick(pick.what(i + 1), (lat, lon) => {
+        // A waypoint row is an identifier OR a position; the click means the position.
+        setRowValues(row, { ...rowValues(row), ident: "", lat, lon });
+        if (pick.mode) controls.survey_area_mode.element.value = pick.mode;
+      }));
+      row.insertCell().append(button);
+    }
+    const remove = Object.assign(document.createElement("button"), {
+      type: "button", textContent: "✕", className: "pick",
+      title: "Delete this row. The rows below it move up." });
+    remove.addEventListener("click", () => deleteRow(tableId, body, i));
+    row.insertCell().append(remove);
   }
 }
 
@@ -186,6 +204,23 @@ function swapRows(body, a, b) {
   setRowValues(body.rows[a], second);
   setRowValues(body.rows[b], first);
   rememberPlan();
+}
+
+// Remove one row and close the gap. Regenerates, except when that would only raise the
+// "need 3 points" error: fewer than 3 boundary corners is not an area yet.
+function deleteRow(tableId, body, index) {
+  const all = [...body.rows].map(rowValues);
+  const { make_line: _flag, ...texts } = all[index];
+  if (!Object.values(texts).some(Boolean)) return;     // already empty
+  all.splice(index, 1);
+  [...body.rows].forEach((tr, i) => setRowValues(tr, all[i]));
+  rememberPlan();
+  const corners = all.filter((r) => r.lat || r.lon).length;
+  if (tableId === "boundary-table" && corners < 3 && controls.survey_area_mode.element.value !== "CenterPoint") {
+    setStatus(`Boundary point deleted. ${corners} left — at least 3 are needed to generate.`);
+    return;
+  }
+  generate();
 }
 
 function tableRows(tableId, keepIf) {
@@ -424,6 +459,7 @@ function startMap() {
   map.attributionControl.setPrefix("");
   L.control.scale({ imperial: false }).addTo(map);
   layers = L.layerGroup().addTo(map);
+  map.on("click", onMapClick);
 }
 
 function setBasemap(name) {
@@ -481,6 +517,59 @@ function drawMap() {
 
   map.invalidateSize();
   if (everything.length) map.fitBounds(L.latLngBounds(everything).pad(0.08));
+}
+
+// ---------- pick on map ----------
+// A Pick button arms the map: the next click hands its position to `apply(lat, lon)`, as
+// text, and the plan is regenerated. Nothing leaves the browser.
+
+let picking = null;
+
+function beginPick(description, apply) {
+  if (!$("qr").hidden) toggleQr();
+  picking = apply;
+  $("map").classList.add("picking");
+  let note = "";
+  if (!BASEMAPS[$("basemap").value]) {
+    // A click on a blank map can only be aimed against the pattern itself.
+    $("basemap").value = "topo";
+    setBasemap("topo");
+    note = " Basemap turned on (its tiles come from Esri).";
+  }
+  setStatus(`Click the map to place ${description}. Esc cancels.${note}`);
+  // The same prompt on the map itself, with a Cancel button: an iPad has no Esc key, and
+  // on a narrow screen the status line is scrolled out of sight above the map.
+  $("pick-text").textContent = `Tap the map to place ${description}`;
+  $("pick-banner").hidden = false;
+  // On a phone the map sits below the form.
+  $("view").scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function endPick(message) {
+  if (!picking) return;
+  picking = null;
+  $("map").classList.remove("picking");
+  $("pick-banner").hidden = true;
+  if (message) setStatus(message);
+}
+
+function onMapClick(event) {
+  if (!picking) return;
+  const apply = picking, at = event.latlng.wrap();
+  endPick();
+  map.closePopup();
+  // 5 decimals is about a metre, far finer than a click can aim.
+  apply(at.lat.toFixed(5), at.lng.toFixed(5));
+  rememberPlan();
+  generate();
+}
+
+function pickCentre() {
+  beginPick("the centre point", (lat, lon) => {
+    controls.center_lat.element.value = lat;
+    controls.center_lon.element.value = lon;
+    controls.survey_area_mode.element.value = "CenterPoint";
+  });
 }
 
 // ---------- QR ----------
@@ -541,9 +630,12 @@ function selectTab(name) {
 
 async function main() {
   buildFields();
-  buildRows("boundary-table", BOUNDARY_ROWS, ["lat", "lon", "label"]);
-  buildRows("before-table", TRANSIT_ROWS, ["ident", "lat", "lon", "label", "make_line"]);
-  buildRows("after-table", TRANSIT_ROWS, ["ident", "lat", "lon", "label", "make_line"]);
+  buildRows("boundary-table", BOUNDARY_ROWS, ["lat", "lon", "label"],
+            { what: (n) => `boundary point ${n}`, mode: AREA_MODES[0] });
+  buildRows("before-table", TRANSIT_ROWS, ["ident", "lat", "lon", "label", "make_line"],
+            { what: (n) => `waypoint ${n} before the survey box` });
+  buildRows("after-table", TRANSIT_ROWS, ["ident", "lat", "lon", "label", "make_line"],
+            { what: (n) => `waypoint ${n} after the survey box` });
   restorePlan();
   controls.initial_heading_deg.element.addEventListener("input", () => refreshFirstLine());
   startMap();
@@ -571,6 +663,11 @@ async function main() {
   $("basemap").addEventListener("change", (event) => setBasemap(event.target.value));
   $("toggle-qr").addEventListener("click", toggleQr);
   $("open-foreflight").addEventListener("click", openInForeFlight);
+  $("pick-center").addEventListener("click", pickCentre);
+  $("pick-cancel").addEventListener("click", () => endPick("Pick cancelled."));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") endPick("Pick cancelled.");
+  });
   for (const button of document.querySelectorAll("[data-file]")) {
     button.addEventListener("click", () => download(result.files[button.dataset.file]));
   }

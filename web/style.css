@@ -36,7 +36,7 @@ button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .5; cursor: default; }
 button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
 
-main { flex: 1; display: grid; grid-template-columns: minmax(340px, 470px) 1fr; gap: 12px;
+main { flex: 1; display: grid; grid-template-columns: minmax(340px, 510px) 1fr; gap: 12px;
        padding: 12px 16px; min-height: 0; }
 #inputs, #outputs { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
                     min-width: 0; }
@@ -61,7 +61,23 @@ table.grid td:first-child { color: var(--muted); width: 1.6em; }
 table.grid input[type=text] { width: 100%; min-width: 0; padding: 4px 6px; }
 table.grid .ident { width: 4.6em; }
 table.grid .move { white-space: nowrap; }
-table.grid .move button { padding: 2px 6px; }
+table.grid .move button, table.grid .pick { padding: 2px 6px; }
+#map.picking, #map.picking .leaflet-interactive { cursor: crosshair; }
+/* Over the map (Leaflet's panes and controls reach z-index 1000), under the QR view. */
+#pick-banner { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1050;
+               display: flex; gap: 12px; align-items: center; max-width: calc(100% - 110px);
+               padding: 8px 10px 8px 14px; border-radius: 8px; background: var(--accent);
+               color: var(--accent-ink); font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+#pick-banner[hidden] { display: none; }
+/* Touch screens (the iPad that also runs ForeFlight): finger-sized buttons, and 16px text
+   in fields so Safari does not zoom the page when one is tapped. */
+@media (pointer: coarse) {
+  button, select { min-height: 40px; }
+  input[type=text], select { font-size: 16px; }
+  table.grid .move button, table.grid .pick { padding: 6px 8px; min-width: 34px; }
+  table.grid .move { width: 1%; }
+  input[type=checkbox] { width: 22px; height: 22px; }
+}
 
 #summary { margin: 10px 0 0; white-space: pre-wrap; font: 12.5px/1.45 ui-monospace, Consolas, monospace; }
 
