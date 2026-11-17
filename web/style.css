@@ -105,6 +105,7 @@ table.grid .move button, table.grid .pick { padding: 2px 6px; }
 .wp-label::before { display: none; }
 .wp-label.boundary { color: #5b1f96; font-weight: 500; }
 .wp-label.transit { color: #333; }
+.wp-label.tfr { color: #b0006a; }
 
 footer { padding: 8px 16px 14px; color: var(--muted); font-size: 12.5px; }
 
@@ -113,3 +114,5 @@ footer { padding: 8px 16px 14px; color: var(--muted); font-size: 12.5px; }
   #outputs { min-height: 0; position: static; height: auto; }
   #view { flex: none; height: 60vh; }
 }
+/* Leaflet 1.9 draws a focus box around a clicked shape; with click-to-place that is noise. */
+.leaflet-interactive:focus { outline: none; }

@@ -86,6 +86,8 @@
       <strong id="plan-title">Flight path preview</strong>
       <span class="spacer"></span>
       <label><input type="checkbox" id="show-labels" checked> Labels</label>
+      <label title="NASA FIRMS active-fire detections from the VIIRS satellites, last 7 days, 375 m. Red is the last 24 hours, orange the last 3 days, yellow older. Read from the copy Esri hosts; the request names a region snapped out to whole degrees, not the survey area. A detection is a satellite pixel, not a fire perimeter."><input type="checkbox" id="show-fires"> Fire hotspots</label>
+      <label title="The FAA's active Temporary Flight Restrictions. Firefighting TFRs are typed HAZARDS. The whole national list is loaded, so nothing about the survey area is sent. Outlines only, no altitudes or times: for awareness, NOT a substitute for a NOTAM briefing."><input type="checkbox" id="show-tfrs"> TFRs</label>
       <label title="Off by default. A basemap asks Esri's servers for map tiles of the survey area, which tells them where it is. The ⊕ Pick buttons turn it on, since a click needs a map to aim at.">Basemap
         <select id="basemap">
           <option value="none">None (private)</option>
@@ -123,7 +125,10 @@
   Everything is calculated in your browser. The coordinates you type are not sent to any
   server and are kept only in this browser's storage. Turning on a basemap is the one
   exception: it requests map tiles for the area from Esri. The ⊕ Pick buttons turn the basemap
-  on, because a click needs a map to aim at.
+  on, because a click needs a map to aim at. <b>Fire hotspots</b> asks Esri for NASA FIRMS
+  detections across a region hundreds of kilometres wide, and <b>TFRs</b> loads the FAA's
+  national list; neither sends the survey area. TFR outlines are for awareness only and are
+  not a substitute for a NOTAM briefing.
 </footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>

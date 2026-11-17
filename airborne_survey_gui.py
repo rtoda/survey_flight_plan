@@ -1187,6 +1187,85 @@ BASEMAP_URL = ("https://server.arcgisonline.com/ArcGIS/rest/services/{service}/M
                "&format=png24&f=image")
 
 
+# --- LIVE OVERLAYS ---
+# Two things worth seeing while drawing a survey boundary around a fire. Both are display
+# only, both are off until asked for, and neither touches the exported files.
+#
+# Fire hotspots: NASA FIRMS active-fire detections from the VIIRS instruments (375 m, last
+# 7 days), read from the copy Esri hosts on ArcGIS Online because that one needs no API key.
+# The request names a region, so it is snapped out to a coarse block of whole degrees: the
+# server learns roughly which part of the country, not where the survey is.
+#
+# TFRs: the FAA's own list of active Temporary Flight Restrictions. The whole national list
+# is fetched (it is about 70 kB), so the request says nothing about the survey area.
+FIRE_URL = ("https://services9.arcgis.com/RHVPKKiFTONKtxq3/arcgis/rest/services/"
+            "Satellite_VIIRS_Thermal_Hotspots_and_Fire_Activity/FeatureServer/0/query"
+            "?where=1%3D1&geometry={w},{s},{e},{n}&geometryType=esriGeometryEnvelope&inSR=4326"
+            "&outFields=hours_old&outSR=4326&geometryPrecision=5&f=geojson")
+TFR_URL = ("https://tfr.faa.gov/geoserver/TFR/ows?service=WFS&version=1.1.0&request=GetFeature"
+           "&typeName=TFR:V_TFR_LOC&outputFormat=application/json")
+OVERLAY_MAX_AGE_S = 600           # refetch after ten minutes; fires and TFRs both move
+FIRE_COLOURS = ((24, "#d50000"), (72, "#ff6d00"), (1e9, "#f2b600"))   # hours old -> colour
+TFR_COLOUR = "#b0006a"
+
+
+def snap_region(west, south, east, north, block=2.0):
+    """Grow a lat/lon box by a degree and out to a grid of `block` degrees.
+
+    Used for the fire-hotspot request, for two reasons: the region asked for stays the same
+    while the view pans and zooms inside it, so there is one download rather than one per
+    redraw, and the server sees a coarse block rather than the survey's outline.
+    """
+    return (max(-180.0, math.floor((west - 1.0) / block) * block),
+            max(-90.0, math.floor((south - 1.0) / block) * block),
+            min(180.0, math.ceil((east + 1.0) / block) * block),
+            min(90.0, math.ceil((north + 1.0) / block) * block))
+
+
+def parse_hotspots(raw):
+    """[(lat, lon, hours_old)] from the hotspot service's GeoJSON, oldest first."""
+    points = []
+    for feature in json.loads(raw).get("features") or []:
+        try:
+            lon, lat = feature["geometry"]["coordinates"][:2]
+            hours = float((feature.get("properties") or {}).get("hours_old") or 0.0)
+            points.append((float(lat), float(lon), hours))
+        except (KeyError, TypeError, ValueError):
+            continue                      # one malformed detection is not worth the lot
+    points.sort(key=lambda p: -p[2])      # newest drawn last, so it lands on top
+    return points
+
+
+def parse_tfrs(raw):
+    """Active TFRs from the FAA's GeoJSON: outline rings in (lat, lon), plus what to call them."""
+    tfrs = []
+    for feature in json.loads(raw).get("features") or []:
+        geometry = feature.get("geometry") or {}
+        props = feature.get("properties") or {}
+        polygons = (geometry.get("coordinates") or [])
+        if geometry.get("type") == "Polygon":
+            polygons = [polygons]
+        elif geometry.get("type") != "MultiPolygon":
+            continue
+        rings = []
+        for polygon in polygons:
+            try:
+                rings.append([(float(lat), float(lon)) for lon, lat, *_ in polygon[0]])
+            except (IndexError, TypeError, ValueError):
+                continue
+        rings = [ring for ring in rings if len(ring) >= 3]
+        if not rings:
+            continue
+        lats = [lat for ring in rings for lat, _ in ring]
+        lons = [lon for ring in rings for _, lon in ring]
+        # NOTAM_KEY reads "6/8032-1-FDC-F"; the part pilots quote is the "6/8032".
+        notam = str(props.get("NOTAM_KEY") or "").split("-")[0]
+        tfrs.append({"rings": rings, "notam": notam, "type": str(props.get("LEGAL") or ""),
+                     "title": str(props.get("TITLE") or ""),
+                     "box": (min(lons), min(lats), max(lons), max(lats))})
+    return tfrs
+
+
 class FlightPlannerGUI(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1257,6 +1336,7 @@ class FlightPlannerGUI(tk.Tk):
         self._zoom = None
         self._view = None
         self._drag_origin = None
+        self._drag_moved = (0, 0)
         # Armed by a Pick button: (description, callback taking lat and lon as text). The
         # next plain click on the preview places that point.
         self._pick = None
@@ -1269,6 +1349,15 @@ class FlightPlannerGUI(tk.Tk):
         self._basemap_want = None
         self._basemap_inbox = {}
         self._basemap_after = None
+        # Live overlays, both off until ticked. Each cache holds what was fetched and when;
+        # the *_asked markers stop a redraw from starting a second download of the same thing.
+        self.show_fires = tk.BooleanVar(value=False)
+        self.show_tfrs = tk.BooleanVar(value=False)
+        self._fires = None            # {'box': region fetched, 'points': [...], 'at': time}
+        self._fires_asked = None
+        self._tfrs = None             # {'items': [...], 'at': time}
+        self._tfrs_asked = False
+        self._net_afters = set()      # polling callbacks to cancel when the window closes
 
         # Everything below is slow enough to look like a hang, so it happens behind a splash.
         # The window itself stays hidden until there is something worth showing.
@@ -1623,7 +1712,7 @@ class FlightPlannerGUI(tk.Tk):
                 "area should be. Its latitude and longitude are filled in, Survey Area "
                 "Defined By switches to Boundary GPS, and the plan is regenerated.\n\n"
                 "A basemap is turned on so there is something to click on. Scroll the mouse "
-                "wheel or drag a box to zoom first. Esc cancels.")
+                "wheel to zoom and drag to move the map first. Esc cancels.")
 
         self.coord_rows = []
         for i in range(10):
@@ -1680,7 +1769,7 @@ class FlightPlannerGUI(tk.Tk):
                 "latitude and longitude above are filled in, Survey Area Defined By switches "
                 "to CenterPoint, and the plan is regenerated.\n\n"
                 "A basemap is turned on so there is something to click on. Scroll the mouse "
-                "wheel or drag a box to zoom first. Esc cancels.")
+                "wheel to zoom and drag to move the map first. Esc cancels.")
 
         # TAB 4: TRANSIT WAYPOINTS, BEFORE AND AFTER THE SURVEY BOX
         transit_tab = ttk.Frame(notebook, padding=10)
@@ -1736,7 +1825,7 @@ class FlightPlannerGUI(tk.Tk):
                     "is cleared, since a row takes one or the other) and the plan is "
                     "regenerated.\n\n"
                     "A basemap is turned on so there is something to click on. Scroll the "
-                    "mouse wheel or drag a box to zoom first -- scroll out to reach places "
+                    "mouse wheel to zoom and drag to move the map first -- scroll out to reach places "
                     "beyond the pattern. Esc cancels.")
             row_cursor += 1
 
@@ -1885,15 +1974,14 @@ class FlightPlannerGUI(tk.Tk):
         ToolTip(basemap_box, basemap_tip)
         ttk.Button(preview_header, text="Show Export Files",
                    command=self._open_export_folder).pack(side=tk.RIGHT)
-        self.zoom_button = ttk.Button(preview_header, text="Reset Zoom", width=11,
+        self.zoom_button = ttk.Button(preview_header, text="Reset View", width=11,
                                       command=self._reset_zoom)
         self.zoom_button.state(["disabled"])
         self.zoom_button.pack(side=tk.RIGHT, padx=(0, 8))
         ToolTip(self.zoom_button,
-                "Drag a box on the preview to zoom into it. Right-click the preview, or "
-                "press this, to go back to the full extent.\n\n"
-                "The selection is grown to the pane's shape before zooming, so a metre "
-                "stays a metre in both directions and the pattern is never stretched.")
+                "The preview handles like a web map: drag with the left button to move "
+                "it, scroll the wheel to zoom about the pointer, double-click to zoom in.\n\n"
+                "Right-click the preview, or press this, to go back to the whole plan.")
 
         qr_button = ttk.Button(preview_header, textvariable=self.qr_button_text,
                                width=10, command=self._toggle_qr)
@@ -1930,6 +2018,34 @@ class FlightPlannerGUI(tk.Tk):
                                          command=self._draw_preview)
         waypoint_check.pack(side=tk.LEFT, padx=(0, 14))
         boundary_check.pack(side=tk.LEFT, padx=(0, 14))
+
+        fires_check = ttk.Checkbutton(preview_tools, text="Fire hotspots",
+                                      variable=self.show_fires, command=self._draw_preview)
+        fires_check.pack(side=tk.LEFT, padx=(0, 14))
+        ToolTip(fires_check,
+                "Overlay NASA FIRMS active-fire detections: every hotspot the VIIRS "
+                "satellite instruments saw in the last 7 days, at 375 m. Red is the last 24 "
+                "hours, orange the last 3 days, yellow older. Useful for drawing a boundary "
+                "around where the fire is now.\n\n"
+                "The data comes from the copy Esri hosts (no key needed). The request names "
+                "a region snapped out to whole degrees -- hundreds of kilometres across -- so "
+                "it does not give away the survey area. Refreshed every 10 minutes while "
+                "ticked.\n\n"
+                "A detection is a satellite pixel, not a fire perimeter, and the newest "
+                "pass can be hours old. Needs an internet connection. Display only.")
+        tfrs_check = ttk.Checkbutton(preview_tools, text="TFRs",
+                                     variable=self.show_tfrs, command=self._draw_preview)
+        tfrs_check.pack(side=tk.LEFT, padx=(0, 14))
+        ToolTip(tfrs_check,
+                "Overlay the FAA's active Temporary Flight Restrictions, outlined and "
+                "labelled with the NOTAM number and type. Firefighting TFRs are the ones "
+                "typed HAZARDS.\n\n"
+                "The whole national list is downloaded from tfr.faa.gov, so the request "
+                "says nothing about the survey area. Refreshed every 10 minutes while "
+                "ticked.\n\n"
+                "For awareness while planning only. It shows outlines, not altitudes or "
+                "times, and it is NOT a substitute for a NOTAM briefing. Needs an internet "
+                "connection. Display only.")
         ToolTip(waypoint_check,
                 "Show the exported waypoint names (1L1S, 1L1F, …) at each line end, so the "
                 "preview can be read against the CSVs.\n\n"
@@ -1940,9 +2056,11 @@ class FlightPlannerGUI(tk.Tk):
         self.preview_canvas = tk.Canvas(right_frame, bg="white", highlightthickness=0)
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
         self.preview_canvas.bind("<Configure>", lambda _event: self._draw_preview())
-        self.preview_canvas.bind("<ButtonPress-1>", self._on_zoom_press)
-        self.preview_canvas.bind("<B1-Motion>", self._on_zoom_drag)
-        self.preview_canvas.bind("<ButtonRelease-1>", self._on_zoom_release)
+        # Handled like a web map: drag to move, wheel to zoom, double-click to zoom in.
+        self.preview_canvas.bind("<ButtonPress-1>", self._on_pan_press)
+        self.preview_canvas.bind("<B1-Motion>", self._on_pan_drag)
+        self.preview_canvas.bind("<ButtonRelease-1>", self._on_pan_release)
+        self.preview_canvas.bind("<Double-Button-1>", self._on_double_click)
         # Button-2 as well as 3: right-click is the middle button number on some macOS setups.
         for sequence in ("<Button-3>", "<Button-2>"):
             self.preview_canvas.bind(sequence, self._reset_zoom)
@@ -1957,6 +2075,9 @@ class FlightPlannerGUI(tk.Tk):
         if self._basemap_after:
             self.after_cancel(self._basemap_after)
             self._basemap_after = None
+        for after_id in list(self._net_afters):
+            self.after_cancel(after_id)
+        self._net_afters.clear()
         super().destroy()
 
     def _first_line_options(self):
@@ -2056,33 +2177,44 @@ class FlightPlannerGUI(tk.Tk):
         self._update_zoom_controls()
         self._draw_preview()
 
-    def _on_zoom_press(self, event):
-        # No zooming in the QR view -- it is not a map.
+    def _on_pan_press(self, event):
+        # Nothing to move in the QR view -- it is not a map.
         self._drag_origin = None if (self.showing_qr or not self._view) else (event.x, event.y)
+        self._drag_moved = (0, 0)
 
-    def _on_zoom_drag(self, event):
+    def _on_pan_drag(self, event):
+        """Slide the picture with the pointer; the real redraw waits for the release."""
         if not self._drag_origin:
             return
-        x0, y0 = self._drag_origin
-        self.preview_canvas.delete("zoombox")
-        self.preview_canvas.create_rectangle(x0, y0, event.x, event.y, outline="#1f6fd0",
-                                             width=1, dash=(4, 3), tags="zoombox")
+        dx, dy = event.x - self._drag_origin[0], event.y - self._drag_origin[1]
+        # Under 5 px is a click with a twitch in it, not a drag.
+        if self._drag_moved == (0, 0) and abs(dx) < 5 and abs(dy) < 5:
+            return
+        self.preview_canvas.configure(cursor="fleur")
+        self.preview_canvas.move("all", dx - self._drag_moved[0], dy - self._drag_moved[1])
+        self._drag_moved = (dx, dy)
 
-    def _on_zoom_release(self, event):
+    def _on_pan_release(self, event):
         if not self._drag_origin:
             return
-        x0, y0 = self._drag_origin
         self._drag_origin = None
-        self.preview_canvas.delete("zoombox")
-        # A click, or a twitch while clicking, is not a zoom request -- but it is where an
-        # armed Pick button wants its point.
-        if abs(event.x - x0) < 12 or abs(event.y - y0) < 12:
+        dx, dy = self._drag_moved
+        self.preview_canvas.configure(cursor="crosshair" if self._pick else "")
+        if (dx, dy) == (0, 0):
+            # A plain click: where an armed Pick button wants its point.
             if self._pick:
                 self._finish_pick(event.x, event.y)
             return
-        self._zoom = self._pixels_to_region(x0, y0, event.x, event.y)
+        min_x, min_y, max_x, max_y = self._shown_region()
+        shift_x, shift_y = -dx / self._view['scale'], dy / self._view['scale']
+        self._zoom = (min_x + shift_x, min_y + shift_y, max_x + shift_x, max_y + shift_y)
         self._update_zoom_controls()
         self._draw_preview()
+
+    def _on_double_click(self, event):
+        """Zoom in two notches about the pointer, as a double-click does on a web map."""
+        if self._view and not self.showing_qr and not self._pick:
+            self._zoom_about(event.x, event.y, 0.8 * 0.8)
 
     def _pixel_to_map(self, px, py):
         """A canvas pixel as map metres, using the view the preview was last drawn with."""
@@ -2090,27 +2222,37 @@ class FlightPlannerGUI(tk.Tk):
         return (view['min_x'] + (px - view['off_x']) / view['scale'],
                 view['min_y'] + (view['base_y'] - py) / view['scale'])
 
+    def _shown_region(self):
+        """The map region on screen now, in metres: (min_x, min_y, max_x, max_y).
+
+        That is the drawing area between the header band and the scale bar, which the
+        pattern is centred in -- the same box self._zoom describes.
+        """
+        view = self._view
+        half_w = view['avail_w'] / view['scale'] / 2.0
+        half_h = view['avail_h'] / view['scale'] / 2.0
+        mid_x, mid_y = self._pixel_to_map(self.preview_canvas.winfo_width() / 2.0,
+                                          view['pad_top'] + view['avail_h'] / 2.0)
+        return (mid_x - half_w, mid_y - half_h, mid_x + half_w, mid_y + half_h)
+
+    def _zoom_about(self, px, py, factor):
+        """Scale the view about a pixel, so what is under the pointer stays under it."""
+        min_x, min_y, max_x, max_y = self._shown_region()
+        # Stop at 50 m and 5000 km across: past either the picture says nothing.
+        if not 50.0 < (max_x - min_x) * factor < 5.0e6:
+            return
+        cx, cy = self._pixel_to_map(px, py)
+        self._zoom = (cx + (min_x - cx) * factor, cy + (min_y - cy) * factor,
+                      cx + (max_x - cx) * factor, cy + (max_y - cy) * factor)
+        self._update_zoom_controls()
+        self._draw_preview()
+
     def _on_wheel(self, event):
         """Zoom the preview in or out about the pointer, one notch per wheel click."""
         if self.showing_qr or not self._view:
             return
         zoom_in = event.delta > 0 or getattr(event, 'num', 0) == 4
-        factor = 0.8 if zoom_in else 1.25
-        view = self._view
-        # The region on screen now: the drawing area, which the pattern is centred in.
-        half_w = view['avail_w'] / view['scale'] / 2.0
-        half_h = view['avail_h'] / view['scale'] / 2.0
-        mid_x, mid_y = self._pixel_to_map(self.preview_canvas.winfo_width() / 2.0,
-                                          view['pad_top'] + view['avail_h'] / 2.0)
-        cx, cy = self._pixel_to_map(event.x, event.y)
-        # Scale about the pointer, so what is under it stays under it. Stop at 50 m and
-        # 5000 km across: past either the picture says nothing.
-        if not 25.0 < half_w * factor < 2.5e6:
-            return
-        self._zoom = (cx + (mid_x - half_w - cx) * factor, cy + (mid_y - half_h - cy) * factor,
-                      cx + (mid_x + half_w - cx) * factor, cy + (mid_y + half_h - cy) * factor)
-        self._update_zoom_controls()
-        self._draw_preview()
+        self._zoom_about(event.x, event.y, 0.8 if zoom_in else 1.25)
 
     # --- PICK ON PREVIEW -------------------------------------------------------------
 
@@ -2131,8 +2273,8 @@ class FlightPlannerGUI(tk.Tk):
             self.basemap.set("Topo")
             self._draw_preview()
             note = " Basemap turned on (from Esri)."
-        self.status_var.set(f"Click the preview to place {description}. Scroll or drag a box "
-                            f"to zoom first; Esc cancels.{note}")
+        self.status_var.set(f"Click the preview to place {description}. Scroll to zoom and drag "
+                            f"to move the map first; Esc cancels.{note}")
 
     def _cancel_pick(self, _event=None):
         if self._pick:
@@ -2244,6 +2386,98 @@ class FlightPlannerGUI(tk.Tk):
                                 f"connection; the preview works without it.")
         self._draw_preview()
 
+    # --- LIVE OVERLAYS ---------------------------------------------------------------
+
+    @staticmethod
+    def _http_get(url):
+        import urllib.request
+        request = urllib.request.Request(url, headers={"User-Agent": "survey-flight-planner"})
+        with urllib.request.urlopen(request, timeout=25) as response:
+            return response.read()
+
+    def _run_async(self, job, done):
+        """Run `job()` off the Tk thread, then `done(result, error)` back on it."""
+        import threading
+        outcome = []
+
+        def work():
+            try:
+                outcome.append((job(), None))
+            except Exception as err:        # offline, blocked, bad data: the caller reports it
+                outcome.append((None, str(err) or type(err).__name__))
+
+        def poll(after_id=None):
+            self._net_afters.discard(after_id)
+            if outcome:
+                done(*outcome[0])
+                return
+            holder = []
+            holder.append(self.after(100, lambda: poll(holder[0])))
+            self._net_afters.add(holder[0])
+
+        threading.Thread(target=work, daemon=True).start()
+        poll()
+
+    def _view_region(self, width, height):
+        """The lat/lon box the preview is showing: (west, south, east, north)."""
+        to_latlon = self._preview['to_latlon']
+        corners = [to_latlon(*self._pixel_to_map(px, py))
+                   for px in (0, width) for py in (0, height)]
+        lats, lons = [c[0] for c in corners], [c[1] for c in corners]
+        return (min(lons), min(lats), max(lons), max(lats))
+
+    def _overlay_fires(self, view):
+        """Hotspots to draw for this view, fetching a wider region when they are not in hand."""
+        have = self._fires
+        covers = bool(have) and (have['box'][0] <= view[0] and have['box'][1] <= view[1]
+                                 and have['box'][2] >= view[2] and have['box'][3] >= view[3])
+        if not covers or time.time() - have['at'] > OVERLAY_MAX_AGE_S:
+            want = snap_region(*view)
+            if self._fires_asked != want:
+                self._fires_asked = want
+                url = FIRE_URL.format(w=want[0], s=want[1], e=want[2], n=want[3])
+
+                def done(points, error):
+                    if self._fires_asked != want:
+                        return                # the view moved on; a newer request is out
+                    self._fires_asked = None
+                    # Kept even when it failed, so a dead connection is not retried on
+                    # every redraw -- only when the ten minutes are up.
+                    self._fires = {'box': want, 'points': points or [], 'at': time.time()}
+                    if error:
+                        self.status_var.set(f"Fire hotspots not loaded ({error}). Check the "
+                                            f"internet connection.")
+                    else:
+                        recent = sum(1 for p in points if p[2] <= 24)
+                        self.status_var.set(
+                            f"Fire hotspots: {len(points)} in the last 7 days across this "
+                            f"region, {recent} in the last 24 h (NASA FIRMS, VIIRS).")
+                    self._draw_preview()
+
+                self._run_async(lambda: parse_hotspots(self._http_get(url)), done)
+        return have['points'] if covers else []
+
+    def _overlay_tfrs(self):
+        """Active TFRs, fetching the national list when it is missing or stale."""
+        have = self._tfrs
+        if (not have or time.time() - have['at'] > OVERLAY_MAX_AGE_S) and not self._tfrs_asked:
+            self._tfrs_asked = True
+
+            def done(items, error):
+                self._tfrs_asked = False
+                self._tfrs = {'items': items or [], 'at': time.time()}
+                if error:
+                    self.status_var.set(f"TFRs not loaded ({error}). Check the internet "
+                                        f"connection.")
+                else:
+                    hazards = sum(1 for t in items if t['type'] == "HAZARDS")
+                    self.status_var.set(f"TFRs: {len(items)} active nationwide, {hazards} of "
+                                        f"them HAZARDS (FAA). Not a substitute for a briefing.")
+                self._draw_preview()
+
+            self._run_async(lambda: parse_tfrs(self._http_get(TFR_URL)), done)
+        return have['items'] if have else []
+
     def _pick_centre(self):
         def apply(lat, lon):
             self._set_entry(self.inputs["center_lat"], lat)
@@ -2251,28 +2485,6 @@ class FlightPlannerGUI(tk.Tk):
             self.survey_area_mode.set("CenterPoint")
 
         self._begin_pick("the centre point", apply)
-
-    def _pixels_to_region(self, x0, y0, x1, y1):
-        """Turn a dragged pixel rectangle into a map region, in metres."""
-        view = self._view
-        to_map = self._pixel_to_map
-        (ax, ay), (bx, by) = to_map(x0, y0), to_map(x1, y1)
-        min_x, max_x = sorted((ax, bx))
-        min_y, max_y = sorted((ay, by))
-
-        # Grow the selection to the drawing area's aspect ratio. Without this a wide, flat
-        # drag would stretch the pattern, and this preview's whole point is that a metre
-        # across reads the same as a metre up.
-        span_x = max(max_x - min_x, 1.0)
-        span_y = max(max_y - min_y, 1.0)
-        pane_aspect = max(view['avail_w'], 1.0) / max(view['avail_h'], 1.0)
-        if span_x / span_y < pane_aspect:
-            grow = (span_y * pane_aspect - span_x) / 2.0
-            min_x, max_x = min_x - grow, max_x + grow
-        else:
-            grow = (span_x / pane_aspect - span_y) / 2.0
-            min_y, max_y = min_y - grow, max_y + grow
-        return (min_x, min_y, max_x, max_y)
 
     def _toggle_qr(self):
         """Flip the pane between the flight path and the route QR code."""
@@ -2403,7 +2615,10 @@ class FlightPlannerGUI(tk.Tk):
 
         # Asymmetric padding: the top band is reserved for the header and legend and the
         # bottom for the scale bar, so the pattern is never drawn underneath either.
-        pad, pad_top, pad_bottom = 60, 108, 52
+        # Each overlay that is on adds a legend row, so the top band grows to keep the
+        # pattern clear of it.
+        overlay_rows = int(self.show_fires.get()) + int(self.show_tfrs.get())
+        pad, pad_top, pad_bottom = 60, 108 + 16 * overlay_rows, 52
         avail_w = width - 2 * pad
         avail_h = height - pad_top - pad_bottom
         scale = min(avail_w / span_x, avail_h / span_y)
@@ -2449,6 +2664,35 @@ class FlightPlannerGUI(tk.Tk):
             canvas.create_polygon(rect_px, fill="" if basemap_on else "#eaf1fb",
                                   outline="#1f6fd0", width=2)
 
+        # Live overlays, above the map and the envelope but under everything flown.
+        to_xy = self._preview['to_xy']
+        view_region = self._view_region(width, height)
+        if self.show_tfrs.get():
+            for tfr in self._overlay_tfrs():
+                box = tfr['box']
+                # Only what is on screen: a TFR a thousand miles off is far outside this
+                # UTM zone, where the projection stops meaning anything.
+                if (box[2] < view_region[0] or box[0] > view_region[2]
+                        or box[3] < view_region[1] or box[1] > view_region[3]):
+                    continue
+                for ring in tfr['rings']:
+                    ring_px = [to_px(to_xy(lon, lat)) for lat, lon in ring]
+                    canvas.create_polygon([c for p in ring_px for c in p], fill="",
+                                          outline=TFR_COLOUR, width=2, dash=(8, 4))
+                    cx = sum(p[0] for p in ring_px) / len(ring_px)
+                    cy = sum(p[1] for p in ring_px) / len(ring_px)
+                    if 0 <= cx <= width and pad_top <= cy <= height - pad_bottom:
+                        self._label(cx, cy, f"TFR {tfr['notam']} {tfr['type']}".strip(),
+                                    fill=TFR_COLOUR, bold=True)
+        if self.show_fires.get():
+            for lat, lon, hours in self._overlay_fires(view_region):
+                if not (view_region[0] <= lon <= view_region[2]
+                        and view_region[1] <= lat <= view_region[3]):
+                    continue
+                px, py = to_px(to_xy(lon, lat))
+                colour = next(c for limit, c in FIRE_COLOURS if hours <= limit)
+                canvas.create_rectangle(px - 2, py - 2, px + 2, py + 2, fill=colour, outline="")
+
         # Transit legs, drawn under the survey track so the survey stays dominant
         if track:
             for chain, joins_at in ((transit_before, track[0]), (transit_after, track[-1])):
@@ -2479,7 +2723,7 @@ class FlightPlannerGUI(tk.Tk):
         # Labels sit outboard of the pattern centre so they clear the track lines.
         # Seed the collision list with the chrome drawn further down (header, legend,
         # scale bar, north arrow) so a waypoint label never ends up hidden underneath it.
-        placed, hidden = [(pad - 6, 8, pad + 380, 100),
+        placed, hidden = [(pad - 6, 8, pad + 380, pad_top - 8),
                           (pad - 6, height - 44, pad + 300, height - 10),
                           (width - 46, height - 74, width - 22, height - 22)], 0
         centre_x = sum(p[0] for p in track_px) / len(track_px) if track_px else 0.0
@@ -2561,6 +2805,11 @@ class FlightPlannerGUI(tk.Tk):
                   ("#7b2fbe", "Boundary waypoints")]
         if transit_before or transit_after:
             legend.append(("#8a8a8a", "Transit legs to and from the box"))
+        if self.show_fires.get():
+            legend.append((FIRE_COLOURS[0][1], "Fire hotspots, NASA FIRMS VIIRS: red < 24 h, "
+                                               "orange < 3 days, yellow < 7 days"))
+        if self.show_tfrs.get():
+            legend.append((TFR_COLOUR, "FAA TFR outlines (not a substitute for a briefing)"))
         for row, (color, text) in enumerate(legend):
             ly = legend_top + row * 16
             canvas.create_line(pad, ly, pad + 18, ly, fill=color, width=3)
@@ -2571,8 +2820,8 @@ class FlightPlannerGUI(tk.Tk):
         canvas.create_text(width - pad, 20, anchor="e",
                            fill="#a06000" if self._zoom else "#999999",
                            font=("Helvetica", 8, "bold" if self._zoom else "normal"),
-                           text="ZOOMED — right-click to reset" if self._zoom
-                                else "scroll or drag a box to zoom")
+                           text="MOVED — right-click to reset" if self._zoom
+                                else "drag to move, scroll to zoom")
         backing(mark)
 
     def _load_defaults(self):
@@ -3422,6 +3671,7 @@ class FlightPlannerGUI(tk.Tk):
             # Back from preview metres to (lat, lon), for the Pick buttons.
             'to_latlon': lambda x, y: to_geo.transform(x, y)[::-1],
             'epsg': epsg_code,      # the projection those metres are in, for the basemap
+            'to_xy': to_m.transform,                        # (lon, lat) to those metres
             'rect': list(survey_poly.exterior.coords) if survey_poly else [],
             'track': list(flown_track),
             'marks': [] if self.survey_area_mode.get() == "CenterPoint"

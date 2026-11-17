@@ -460,6 +460,7 @@ function startMap() {
   L.control.scale({ imperial: false }).addTo(map);
   layers = L.layerGroup().addTo(map);
   map.on("click", onMapClick);
+  startOverlays();
 }
 
 function setBasemap(name) {
@@ -517,6 +518,130 @@ function drawMap() {
 
   map.invalidateSize();
   if (everything.length) map.fitBounds(L.latLngBounds(everything).pad(0.08));
+}
+
+// ---------- live overlays ----------
+// Fire hotspots (NASA FIRMS VIIRS, via the keyless copy Esri hosts) and the FAA's active
+// TFRs. Both off until ticked, both display only. Mirrors the desktop app's overlays.
+
+const FIRE_URL = "https://services9.arcgis.com/RHVPKKiFTONKtxq3/arcgis/rest/services/" +
+  "Satellite_VIIRS_Thermal_Hotspots_and_Fire_Activity/FeatureServer/0/query" +
+  "?where=1%3D1&geometryType=esriGeometryEnvelope&inSR=4326" +
+  "&outFields=hours_old,frp,satellite&outSR=4326&geometryPrecision=5&f=geojson&geometry=";
+const TFR_WMS = "https://tfr.faa.gov/geoserver/TFR/wms";
+const OVERLAY_MAX_AGE_MS = 600000;
+const TFR_COLOUR = "#b0006a";
+let fireLayer, tfrLayer, fireRenderer;
+let fireBox = null, fireAt = 0, fireSeq = 0, tfrSeq = 0, tfrTimer = null;
+
+function startOverlays() {
+  // Their own panes, under the plan itself (Leaflet's overlay pane is 400).
+  map.createPane("tfr").style.zIndex = 350;
+  map.createPane("fire").style.zIndex = 360;
+  fireRenderer = L.canvas({ pane: "fire" });
+  tfrLayer = L.layerGroup().addTo(map);
+  fireLayer = L.layerGroup().addTo(map);
+  let timer = null;
+  map.on("moveend", () => { clearTimeout(timer); timer = setTimeout(refreshFires, 400); });
+}
+
+// Grow the view by a degree and out to a 2-degree grid: one download serves a lot of
+// panning, and the server sees a coarse block rather than the survey's outline.
+function snapRegion([west, south, east, north]) {
+  const block = 2;
+  return [Math.max(-180, Math.floor((west - 1) / block) * block),
+          Math.max(-90, Math.floor((south - 1) / block) * block),
+          Math.min(180, Math.ceil((east + 1) / block) * block),
+          Math.min(90, Math.ceil((north + 1) / block) * block)];
+}
+
+async function refreshFires() {
+  if (!$("show-fires").checked) {
+    fireSeq++; fireBox = null; fireLayer.clearLayers();
+    return;
+  }
+  const b = map.getBounds();
+  const view = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+  const covers = fireBox && fireBox[0] <= view[0] && fireBox[1] <= view[1] &&
+                 fireBox[2] >= view[2] && fireBox[3] >= view[3];
+  if (covers && Date.now() - fireAt < OVERLAY_MAX_AGE_MS) return;
+  const want = snapRegion(view), seq = ++fireSeq;
+  // Marked as in hand straight away, so a failure is not retried on every pan.
+  fireBox = want; fireAt = Date.now();
+  let features;
+  try {
+    const response = await fetch(FIRE_URL + want.join(","), { referrerPolicy: "no-referrer" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    features = (await response.json()).features;
+    if (!Array.isArray(features)) throw new Error("unexpected answer");
+  } catch (err) {
+    if (seq === fireSeq) setStatus(`Fire hotspots could not be loaded (${err.message}). Check the internet connection.`);
+    return;
+  }
+  if (seq !== fireSeq) return;            // unticked, or the view moved on, meanwhile
+  fireLayer.clearLayers();
+  const hours = (f) => Number((f.properties || {}).hours_old) || 0;
+  features.sort((a, b2) => hours(b2) - hours(a));     // newest last, so it lands on top
+  let recent = 0;
+  for (const feature of features) {
+    const [lon, lat] = feature.geometry.coordinates, age = hours(feature);
+    if (age <= 24) recent++;
+    const marker = L.circleMarker([lat, lon], {
+      renderer: fireRenderer, pane: "fire", radius: 3, stroke: false, fillOpacity: 0.85,
+      fillColor: age <= 24 ? "#d50000" : age <= 72 ? "#ff6d00" : "#f2b600" });
+    const p = feature.properties || {};
+    marker.bindPopup(`Fire hotspot (VIIRS ${p.satellite || ""})<br>${Math.round(age)} h old` +
+                     (p.frp != null ? ` · ${p.frp} MW` : "") + `<br>${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+    marker.addTo(fireLayer);
+  }
+  setStatus(`Fire hotspots: ${features.length} in the last 7 days across this region, ${recent} in the last 24 h (NASA FIRMS, VIIRS).`);
+}
+
+function tfrPopup(feature) {
+  const p = feature.properties || {}, box = document.createElement("div");
+  const head = document.createElement("b");
+  head.textContent = `TFR ${String(p.NOTAM_KEY || "").split("-")[0]} — ${p.LEGAL || ""}`;
+  const title = document.createElement("div");
+  title.textContent = p.TITLE || "";
+  const note = document.createElement("div");
+  note.textContent = "Outline only. Check NOTAMs for altitudes and times.";
+  box.append(head, title, note);
+  return box;
+}
+
+// The national list, through this site's /tfr relay (the FAA server sends no CORS header,
+// so the page cannot read it directly). Where the relay is missing -- the page served from
+// a plain file server -- the FAA's own map image is laid over instead: same outlines, but
+// no names, and the FAA then sees which map tiles were asked for.
+async function refreshTfrs() {
+  const seq = ++tfrSeq;
+  clearTimeout(tfrTimer);
+  tfrLayer.clearLayers();
+  if (!$("show-tfrs").checked) return;
+  tfrTimer = setTimeout(refreshTfrs, OVERLAY_MAX_AGE_MS);
+  try {
+    const response = await fetch("tfr", { cache: "no-cache" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (!Array.isArray(data.features)) throw new Error("unexpected answer");
+    if (seq !== tfrSeq) return;
+    L.geoJSON(data, {
+      pane: "tfr",
+      style: { color: TFR_COLOUR, weight: 2, dashArray: "8 5", fillColor: TFR_COLOUR, fillOpacity: 0.1 },
+      onEachFeature: (feature, layer) => {
+        layer.bindPopup(() => tfrPopup(feature));
+        layer.bindTooltip(`TFR ${String((feature.properties || {}).NOTAM_KEY || "").split("-")[0]} ${(feature.properties || {}).LEGAL || ""}`,
+                          { sticky: true, className: "wp-label tfr" });
+      },
+    }).addTo(tfrLayer);
+    const hazards = data.features.filter((f) => (f.properties || {}).LEGAL === "HAZARDS").length;
+    setStatus(`TFRs: ${data.features.length} active nationwide, ${hazards} of them HAZARDS (FAA). Not a substitute for a briefing.`);
+  } catch (_) {
+    if (seq !== tfrSeq) return;
+    L.tileLayer.wms(TFR_WMS, { layers: "TFR:V_TFR_LOC", format: "image/png", transparent: true,
+                               pane: "tfr", attribution: "TFRs © FAA" }).addTo(tfrLayer);
+    setStatus("TFRs shown as the FAA's map image (outlines without names). Not a substitute for a briefing.");
+  }
 }
 
 // ---------- pick on map ----------
@@ -663,6 +788,8 @@ async function main() {
   $("basemap").addEventListener("change", (event) => setBasemap(event.target.value));
   $("toggle-qr").addEventListener("click", toggleQr);
   $("open-foreflight").addEventListener("click", openInForeFlight);
+  $("show-fires").addEventListener("change", refreshFires);
+  $("show-tfrs").addEventListener("change", refreshTfrs);
   $("pick-center").addEventListener("click", pickCentre);
   $("pick-cancel").addEventListener("click", () => endPick("Pick cancelled."));
   document.addEventListener("keydown", (event) => {

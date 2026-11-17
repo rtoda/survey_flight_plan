@@ -44,7 +44,6 @@ the desktop app.
 - **What it loads from elsewhere:** the Python runtime from jsDelivr and two small libraries
   from cdnjs on every visit, and map tiles from Esri only if the visitor turns a basemap on
   (off by default, because tile requests reveal the survey area).
-- **Not in the web version:** drag-to-zoom on the preview (use the map's zoom instead).
 
 `web/survey_engine.py` is a GUI-free copy of the desktop app's logic, so a fix to one must be
 made in the other. `python tests/parity_check.py` runs both on the same plans and fails if
@@ -52,6 +51,7 @@ their CSV, KML or route output differs.
 
 ## Layout
 - `web/` — the browser version; see **Web app** above
+- `functions/` — Cloudflare Pages Functions for the web app: `tfr.js` relays the FAA's TFR list
 - `tests/parity_check.py` — checks the web engine against the desktop app
 - `tools/build_airports.py` — rebuilds `web/airports.csv`, the ICAO airport table
 - `airborne_survey_gui.py` — main GUI (scaled path preview drawn in-window, with an optional basemap)
@@ -361,12 +361,28 @@ app sends anywhere. A Pick button turns Topo on when no basemap is showing; set 
 None afterwards to stop the requests. It needs an internet connection, and without one the
 preview simply stays blank underneath. Display only — the exported files never change.
 
-**Scroll the mouse wheel** over the preview to zoom in or out about the pointer.
-**Drag a box on the preview** to zoom into it; **right-click** the preview, or press
-**Reset Zoom**, to go back to the full extent. The dragged selection is grown to the pane's
-shape first, so a metre across always reads the same as a metre up and the pattern is never
-stretched. Useful once transit legs stretch the view — they can push the survey box down to
-a corner.
+**Fire hotspots** and **TFRs** are two live overlays for drawing a boundary around an
+active fire. Both are off until ticked, both are display only, and both refresh every 10
+minutes while on.
+
+- **Fire hotspots** shows NASA FIRMS active-fire detections from the VIIRS instruments on
+  S-NPP, NOAA-20 and NOAA-21: every 375 m pixel flagged in the last 7 days, red for the last
+  24 hours, orange for the last 3 days, yellow for older. It is read from the copy Esri hosts
+  on ArcGIS Online, which needs no API key. The request covers a region snapped out to whole
+  degrees — hundreds of kilometres — so it does not give away the survey area. A detection is
+  a satellite pixel, not a fire perimeter, and the newest pass can be several hours old.
+- **TFRs** outlines the FAA's active Temporary Flight Restrictions, labelled with the NOTAM
+  number and type; firefighting TFRs are typed **HAZARDS**. The whole national list is
+  loaded, so nothing about the survey area is sent. The web app reads it through a small
+  relay on its own site (`functions/tfr.js`, a Cloudflare Pages Function), because the FAA
+  server does not let a web page read it directly. **Outlines only — no altitudes or times.
+  It is for awareness while planning and is not a substitute for a NOTAM briefing.**
+
+The preview handles like a web map: **drag with the left button** to move it, **scroll the
+mouse wheel** to zoom in or out about the pointer, and **double-click** to zoom in.
+**Right-click** the preview, or press **Reset View**, to go back to the whole plan. A metre
+across always reads the same as a metre up, so the pattern is never stretched. Useful once
+transit legs stretch the view — they can push the survey box down to a corner.
 
 Use **Show Export Files** in the app to open the folder for AirDropping.
 
