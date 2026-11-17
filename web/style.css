@@ -106,6 +106,7 @@ table.grid .move button, table.grid .pick { padding: 2px 6px; }
 .wp-label.boundary { color: #5b1f96; font-weight: 500; }
 .wp-label.transit { color: #333; }
 .wp-label.tfr { color: #b0006a; }
+.wp-label.terrain { color: #5d4037; }
 
 footer { padding: 8px 16px 14px; color: var(--muted); font-size: 12.5px; }
 

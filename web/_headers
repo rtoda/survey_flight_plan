@@ -5,3 +5,14 @@
 
 /survey_engine.py
   Cache-Control: no-cache
+
+# The page and its script change together; a cached copy of one beside a fresh copy of the
+# other leaves buttons that do nothing. no-cache still allows a cheap "not modified" answer.
+/
+  Cache-Control: no-cache
+/index.html
+  Cache-Control: no-cache
+/app.js
+  Cache-Control: no-cache
+/style.css
+  Cache-Control: no-cache

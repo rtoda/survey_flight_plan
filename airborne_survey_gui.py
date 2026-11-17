@@ -1187,6 +1187,160 @@ BASEMAP_URL = ("https://server.arcgisonline.com/ArcGIS/rest/services/{service}/M
                "&format=png24&f=image")
 
 
+# --- TERRAIN ---
+# Highest and lowest ground under the survey box, so the summary can say what height above
+# ground the Survey MSL altitude leaves. Elevation comes from the open "terrarium" terrain
+# tiles (Mapzen/Tilezen, hosted on AWS): global, no key, each pixel's elevation packed into
+# its red, green and blue. They are ordinary PNGs, decoded here with zlib alone -- no Pillow.
+TERRAIN_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+TERRAIN_MAX_ZOOM = 12             # about 25 m a pixel at mid latitudes
+TERRAIN_MAX_TILES = 12            # a bigger box drops to a coarser zoom rather than more tiles
+LOW_AGL_FT = 1000.0               # flagged in the summary below this
+M_TO_FT = 3.280839895
+
+
+def decode_png_rgb(data):
+    """(width, height, rows) of an 8-bit RGB, non-interlaced PNG; each row is a bytearray."""
+    import struct
+    import zlib
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    header, chunks, pos = None, [], 8
+    while pos + 8 <= len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            chunks.append(body)
+        elif kind == b"IEND":
+            break
+    if header is None or header[2:5] != (8, 2, 0) or header[6] != 0:
+        raise ValueError("unexpected PNG layout")
+    width, height = header[:2]
+    raw = zlib.decompress(b"".join(chunks))
+    stride = width * 3
+    rows, prev = [], bytearray(stride)
+    for r in range(height):
+        start = r * (stride + 1)
+        kind, line = raw[start], bytearray(raw[start + 1:start + 1 + stride])
+        if kind == 1:                                   # Sub
+            for i in range(3, stride):
+                line[i] = (line[i] + line[i - 3]) & 255
+        elif kind == 2:                                 # Up
+            for i in range(stride):
+                line[i] = (line[i] + prev[i]) & 255
+        elif kind == 3:                                 # Average
+            for i in range(stride):
+                left = line[i - 3] if i >= 3 else 0
+                line[i] = (line[i] + ((left + prev[i]) >> 1)) & 255
+        elif kind == 4:                                 # Paeth
+            for i in range(stride):
+                a = line[i - 3] if i >= 3 else 0
+                b = prev[i]
+                c = prev[i - 3] if i >= 3 else 0
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(line)
+        prev = line
+    return width, height, rows
+
+
+def _terrain_pixel(lat, lon, zoom):
+    """Web-Mercator global pixel coordinates of a position at this zoom (256 px tiles)."""
+    scale = 256.0 * 2 ** zoom
+    lat = max(-85.0, min(85.0, lat))
+    return ((lon + 180.0) / 360.0 * scale,
+            (1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * scale)
+
+
+def _terrain_latlon(px, py, zoom):
+    scale = 256.0 * 2 ** zoom
+    return (math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * py / scale)))),
+            px / scale * 360.0 - 180.0)
+
+
+def terrain_extremes(ring_latlon, fetch):
+    """Lowest and highest ground inside a (lat, lon) ring, from terrain tiles.
+
+    `fetch(url)` returns a tile's bytes. Every pixel whose centre falls inside the ring is
+    looked at, at the finest zoom that keeps the ring within TERRAIN_MAX_TILES tiles.
+    Returns a dict -- min_m, max_m, min_at, max_at (lat, lon), res_m -- or None when the
+    ring is too small to contain a pixel centre.
+    """
+    for zoom in range(TERRAIN_MAX_ZOOM, -1, -1):
+        ring = [_terrain_pixel(lat, lon, zoom) for lat, lon in ring_latlon]
+        tx0, tx1 = int(min(p[0] for p in ring) // 256), int(max(p[0] for p in ring) // 256)
+        ty0, ty1 = int(min(p[1] for p in ring) // 256), int(max(p[1] for p in ring) // 256)
+        if (tx1 - tx0 + 1) * (ty1 - ty0 + 1) <= TERRAIN_MAX_TILES:
+            break
+    edges = list(zip(ring, ring[1:] + ring[:1]))
+    low = high = None                     # ((r, g, b), global px, global py)
+    for ty in range(ty0, ty1 + 1):
+        for tx in range(tx0, tx1 + 1):
+            _w, _h, rows = decode_png_rgb(fetch(TERRAIN_URL.format(z=zoom, x=tx, y=ty)))
+            for r, row in enumerate(rows):
+                gy = ty * 256 + r + 0.5
+                # Where this row of pixel centres crosses the ring: inside between pairs.
+                crossings = sorted(x0 + (gy - y0) * (x1 - x0) / (y1 - y0)
+                                   for (x0, y0), (x1, y1) in edges if (y0 <= gy) != (y1 <= gy))
+                for enter, leave in zip(crossings[0::2], crossings[1::2]):
+                    c0 = max(math.ceil(enter - 0.5) - tx * 256, 0)
+                    c1 = min(math.floor(leave - 0.5) - tx * 256, 255)
+                    if c1 < c0:
+                        continue
+                    span = row[3 * c0:3 * (c1 + 1)]
+                    # Elevation rises with (red, green, blue) taken in that order, so the
+                    # tuples sort exactly as the heights do.
+                    pixels = list(zip(span[0::3], span[1::3], span[2::3]))
+                    top, bottom = max(pixels), min(pixels)
+                    if high is None or top > high[0]:
+                        high = (top, tx * 256 + c0 + pixels.index(top) + 0.5, gy)
+                    if low is None or bottom < low[0]:
+                        low = (bottom, tx * 256 + c0 + pixels.index(bottom) + 0.5, gy)
+    if high is None:
+        return None
+
+    def metres(rgb):
+        return rgb[0] * 256.0 + rgb[1] + rgb[2] / 256.0 - 32768.0
+
+    mid_lat = sum(lat for lat, _ in ring_latlon) / len(ring_latlon)
+    return {"min_m": metres(low[0]), "max_m": metres(high[0]),
+            "min_at": _terrain_latlon(low[1], low[2], zoom),
+            "max_at": _terrain_latlon(high[1], high[2], zoom),
+            "res_m": 156543.03392 * math.cos(math.radians(mid_lat)) / 2 ** zoom}
+
+
+def terrain_lines(terrain, msl_text):
+    """Summary lines for the terrain under the box, and whether any of them is a warning."""
+    low_ft, high_ft = terrain["min_m"] * M_TO_FT, terrain["max_m"] * M_TO_FT
+    lines = [f"Terrain in Survey Box: {low_ft:,.0f} to {high_ft:,.0f} ft MSL "
+             f"({terrain['min_m']:,.0f} to {terrain['max_m']:,.0f} m)"]
+    warn = False
+    try:
+        msl_ft = float(msl_text)
+    except (TypeError, ValueError):
+        msl_ft = None
+    if msl_ft is None or msl_ft <= 0:
+        lines.append("AGL: enter Survey MSL (ft) to see the height above ground")
+    else:
+        min_agl, max_agl = msl_ft - high_ft, msl_ft - low_ft
+        lines.append(f"AGL at {msl_ft:,.0f} ft MSL: minimum {min_agl:,.0f} ft, "
+                     f"maximum {max_agl:,.0f} ft")
+        if min_agl <= 0:
+            warn = True
+            lines.append("WARNING: TERRAIN IN THE BOX IS ABOVE THE SURVEY ALTITUDE")
+        elif min_agl < LOW_AGL_FT:
+            warn = True
+            lines.append(f"WARNING: less than {LOW_AGL_FT:,.0f} ft above the highest terrain")
+    lines.append(f"Highest ground: {terrain['max_at'][0]:.4f}, {terrain['max_at'][1]:.4f}   "
+                 f"Lowest: {terrain['min_at'][0]:.4f}, {terrain['min_at'][1]:.4f}")
+    lines.append(f"(terrain tiles, about {terrain['res_m']:.0f} m a pixel; obstacles such as "
+                 f"towers and trees are not included)")
+    return lines, warn
+
+
 # --- LIVE OVERLAYS ---
 # Two things worth seeing while drawing a survey boundary around a fire. Both are display
 # only, both are off until asked for, and neither touches the exported files.
@@ -1340,11 +1494,12 @@ class FlightPlannerGUI(tk.Tk):
         # Armed by a Pick button: (description, callback taking lat and lon as text). The
         # next plain click on the preview places that point.
         self._pick = None
-        # Basemap under the preview: off unless asked for, because fetching it tells the
-        # map server where the survey is. _basemap_have is (key, PhotoImage or None) for
+        # Basemap under the preview: terrain by default. Fetching it tells the map server
+        # where the survey is, so None is there for a survey that must stay private.
+        # _basemap_have is (key, PhotoImage or None) for
         # the last view fetched, _basemap_want the key being waited for; worker threads
         # leave their results in _basemap_inbox for the Tk thread to collect.
-        self.basemap = tk.StringVar(value="None")
+        self.basemap = tk.StringVar(value="Topo")
         self._basemap_have = None
         self._basemap_want = None
         self._basemap_inbox = {}
@@ -1358,6 +1513,10 @@ class FlightPlannerGUI(tk.Tk):
         self._tfrs = None             # {'items': [...], 'at': time}
         self._tfrs_asked = False
         self._net_afters = set()      # polling callbacks to cancel when the window closes
+        # Terrain under the survey box: {'key': the box it was worked out for, 'data': the
+        # terrain_extremes result or None, 'note': what to say when there is no data}.
+        self._terrain = None
+        self._terrain_asked = None
 
         # Everything below is slow enough to look like a hang, so it happens behind a splash.
         # The window itself stays hidden until there is something worth showing.
@@ -1965,10 +2124,10 @@ class FlightPlannerGUI(tk.Tk):
         basemap_box.bind("<<ComboboxSelected>>", lambda _e: self._draw_preview())
         basemap_tip = (
             "Draw a map under the preview: Topo or Satellite, from Esri.\n\n"
-            "None by default, because showing a map means asking Esri's server for a "
-            "picture of the area, which tells it where the survey is. Nothing else in this "
-            "app goes online. The Pick buttons turn Topo on, since a click needs something "
-            "to aim at.\n\n"
+            "Topo (terrain) by default. Showing a map means asking Esri's server for a "
+            "picture of the area, which tells it where the survey is -- choose None for a "
+            "survey that must stay private. With None chosen, the Pick buttons turn Topo "
+            "back on, since a click needs something to aim at.\n\n"
             "Needs an internet connection. Display only: never changes the exported files.")
         ToolTip(basemap_label, basemap_tip)
         ToolTip(basemap_box, basemap_tip)
@@ -2457,6 +2616,60 @@ class FlightPlannerGUI(tk.Tk):
                 self._run_async(lambda: parse_hotspots(self._http_get(url)), done)
         return have['points'] if covers else []
 
+    def _update_terrain(self):
+        """Look up the ground under the survey box just generated, unless it is in hand."""
+        ring = self._preview['ring'] if self._preview else []
+        key = tuple((round(lat, 5), round(lon, 5)) for lat, lon in ring)
+        if not ring:
+            self._terrain = {'key': key, 'data': None, 'note': "Terrain: n/a (no survey box)"}
+        elif self.basemap.get() not in BASEMAP_SERVICES:
+            # Basemap None is the keep-it-private setting; a terrain request would give
+            # the area away just as a map request does.
+            self._terrain = {'key': key, 'data': None,
+                             'note': "Terrain and AGL: not looked up while Basemap is None"}
+        elif self._terrain and self._terrain['key'] == key and self._terrain['data']:
+            pass                              # same box as last time: nothing to fetch
+        else:
+            self._terrain = {'key': key, 'data': None, 'note': "Terrain and AGL: looking up…"}
+            if self._terrain_asked != key:
+                self._terrain_asked = key
+
+                def done(data, error):
+                    if self._terrain_asked == key:
+                        self._terrain_asked = None
+                    if not self._terrain or self._terrain['key'] != key:
+                        return                # a newer box has been generated meanwhile
+                    note = (f"Terrain and AGL: not available ({error})" if error
+                            else "Terrain and AGL: the survey box is too small to measure")
+                    self._terrain = {'key': key, 'data': data, 'note': note}
+                    self._show_terrain()
+                    self._draw_preview()
+
+                self._run_async(lambda: terrain_extremes(ring, self._http_get), done)
+        self._show_terrain()
+
+    def _show_terrain(self):
+        """Put the terrain block at the top of the summary, replacing the previous one."""
+        text = self.stats_text
+        for start, end in zip(*[iter(text.tag_ranges("terrain"))] * 2):
+            text.delete(start, end)
+        if not self._terrain:
+            return
+        data = self._terrain['data']
+        if data:
+            lines, warn = terrain_lines(data, self.inputs["survey_msl_ft"].get().strip())
+        else:
+            lines, warn = [self._terrain['note']], False
+        text.insert("1.0", "\n".join(lines) + "\n\n", ("terrain", "warn") if warn else ("terrain",))
+        if data and " AGL " not in self.status_var.get():
+            try:
+                msl_ft = float(self.inputs["survey_msl_ft"].get())
+            except ValueError:
+                return
+            self.status_var.set(
+                f"{self.status_var.get()} AGL {msl_ft - data['max_m'] * M_TO_FT:,.0f} to "
+                f"{msl_ft - data['min_m'] * M_TO_FT:,.0f} ft.")
+
     def _overlay_tfrs(self):
         """Active TFRs, fetching the national list when it is missing or stale."""
         have = self._tfrs
@@ -2765,6 +2978,19 @@ class FlightPlannerGUI(tk.Tk):
             if not any(self._label(lx, ly, label, anchor=la, fill="#4a1a75", avoid=placed)
                        for lx, ly, la in spots):
                 hidden += 1
+
+        # Highest and lowest ground in the box, once the terrain lookup is back.
+        terrain = self._terrain['data'] if self._terrain else None
+        ring_key = tuple((round(lat, 5), round(lon, 5)) for lat, lon in self._preview['ring'])
+        if terrain and self._terrain['key'] == ring_key:
+            for (lat, lon), metres, word, up in ((terrain['max_at'], terrain['max_m'], "High", True),
+                                                 (terrain['min_at'], terrain['min_m'], "Low", False)):
+                px, py = to_px(to_xy(lon, lat))
+                tip = -7 if up else 7
+                canvas.create_polygon(px - 6, py - tip, px + 6, py - tip, px, py + tip,
+                                      fill="#5d4037", outline="white", width=1)
+                self._label(px, py + (14 if up else -14), f"{word} {metres * M_TO_FT:,.0f} ft",
+                            fill="#5d4037", bold=True, avoid=placed)
 
         # North arrow (UTM grid north is up); kept low-right, clear of the header text
         nx, ny = width - 34, height - 58
@@ -3672,6 +3898,8 @@ class FlightPlannerGUI(tk.Tk):
             'to_latlon': lambda x, y: to_geo.transform(x, y)[::-1],
             'epsg': epsg_code,      # the projection those metres are in, for the basemap
             'to_xy': to_m.transform,                        # (lon, lat) to those metres
+            # The survey box as (lat, lon), for the terrain lookup.
+            'ring': xy_to_latlon(list(survey_poly.exterior.coords)[:-1]) if survey_poly else [],
             'rect': list(survey_poly.exterior.coords) if survey_poly else [],
             'track': list(flown_track),
             'marks': [] if self.survey_area_mode.get() == "CenterPoint"
@@ -3719,6 +3947,7 @@ class FlightPlannerGUI(tk.Tk):
             f"{clearance_m/1000:.2f} km padding{' (SHORT — check offsets)' if short else ''}. "
             f"Send {os.path.basename(pack_file)} to the pilot."
         )
+        self._update_terrain()
 
     def _export_csv_files(self, flown_segments, conversion_func, area_name, line_prefix, out_dir,
                           before=(), after=(), lead_xy=None, line_numbers=None, axis=None):

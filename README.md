@@ -42,8 +42,8 @@ the desktop app.
 - **Deploy:** publish the `web/` folder as-is on any static host; there is no build step. On
   Cloudflare Pages, set the build output directory to `web` and leave the build command empty.
 - **What it loads from elsewhere:** the Python runtime from jsDelivr and two small libraries
-  from cdnjs on every visit, and map tiles from Esri only if the visitor turns a basemap on
-  (off by default, because tile requests reveal the survey area).
+  from cdnjs on every visit, and terrain map tiles from Esri (tile requests reveal the survey area; set **Basemap** to
+  None to stop them).
 
 `web/survey_engine.py` is a GUI-free copy of the desktop app's logic, so a fix to one must be
 made in the other. `python tests/parity_check.py` runs both on the same plans and fails if
@@ -355,11 +355,22 @@ so a bad pick is one click to undo. The plan is regenerated, unless that would l
 than 3 boundary points.
 
 **Basemap** draws a map under the preview — Topo or Satellite, from Esri — so a click has
-something to aim at. It is **None** by default: showing a map means asking Esri's server for
-a picture of the area, which tells it where the survey is, and it is the only thing either
-app sends anywhere. A Pick button turns Topo on when no basemap is showing; set it back to
-None afterwards to stop the requests. It needs an internet connection, and without one the
+something to aim at. It is **Topo** (terrain) by default. Showing a map means asking Esri's
+server for a picture of the area, which tells it where the survey is; it is the only thing
+either app sends that does. Set it to **None** for a survey that must stay private. A Pick
+button turns Topo back on when no basemap is showing. It needs an internet connection, and without one the
 preview simply stays blank underneath. Display only — the exported files never change.
+
+**Terrain and AGL.** After each run the top of the Summary gives the lowest and highest
+ground inside the survey box and the height above ground that the **Survey MSL (ft)** altitude
+leaves over each — the **minimum and maximum AGL** — and the status line repeats the pair. The
+two points are marked on the preview as **High** and **Low** with their elevations. A warning
+appears when the minimum AGL is under 1,000 ft, or when terrain in the box is above the
+survey altitude. Elevation comes from the open terrarium terrain tiles (Mapzen/Tilezen data
+hosted on AWS: global, no key), sampled at every pixel inside the box at up to about 25 m a
+pixel — coarser for a very large box, and the summary says which. **It is terrain only: towers,
+trees and other obstacles are not included, and a coarse pixel can shave a sharp peak.** The
+lookup sends the box's area to that tile server; it is skipped while **Basemap** is None.
 
 **Fire hotspots** and **TFRs** are two live overlays for drawing a boundary around an
 active fire. Both are off until ticked, both are display only, and both refresh every 10

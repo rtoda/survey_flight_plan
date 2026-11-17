@@ -408,6 +408,7 @@ function generate() {
   $("open-foreflight").disabled = false;
   drawMap();
   if (!$("qr").hidden) drawQr();
+  refreshTerrain();
 }
 
 // ---------- downloads ----------
@@ -520,6 +521,154 @@ function drawMap() {
   if (everything.length) map.fitBounds(L.latLngBounds(everything).pad(0.08));
 }
 
+// ---------- terrain ----------
+// Highest and lowest ground under the survey box, and the height above ground that leaves
+// at Survey MSL. Mirrors terrain_extremes / terrain_lines in the desktop app: the open
+// "terrarium" terrain tiles (elevation packed into each pixel's red, green and blue), every
+// pixel whose centre is inside the box.
+
+const TERRAIN_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/";
+const TERRAIN_MAX_ZOOM = 12, TERRAIN_MAX_TILES = 12, LOW_AGL_FT = 1000, M_TO_FT = 3.280839895;
+let terrainLayer, terrainSeq = 0, terrainCache = null;    // {key, data}
+
+function terrainPixel(lat, lon, zoom) {
+  const scale = 256 * 2 ** zoom, clamped = Math.max(-85, Math.min(85, lat));
+  return [(lon + 180) / 360 * scale,
+          (1 - Math.asinh(Math.tan(clamped * Math.PI / 180)) / Math.PI) / 2 * scale];
+}
+
+function terrainLatLon(px, py, zoom) {
+  const scale = 256 * 2 ** zoom;
+  return [Math.atan(Math.sinh(Math.PI * (1 - 2 * py / scale))) * 180 / Math.PI, px / scale * 360 - 180];
+}
+
+function loadTerrainTile(zoom, x, y) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.referrerPolicy = "no-referrer";
+    image.onload = () => {
+      const canvas = Object.assign(document.createElement("canvas"), { width: 256, height: 256 });
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(image, 0, 0);
+      resolve(ctx.getImageData(0, 0, 256, 256).data);
+    };
+    image.onerror = () => reject(new Error("terrain tiles could not be loaded"));
+    image.src = `${TERRAIN_URL}${zoom}/${x}/${y}.png`;
+  });
+}
+
+async function terrainExtremes(ringLatLon) {
+  let zoom, ring, tx0, tx1, ty0, ty1;
+  for (zoom = TERRAIN_MAX_ZOOM; zoom >= 0; zoom--) {
+    ring = ringLatLon.map(([lat, lon]) => terrainPixel(lat, lon, zoom));
+    const xs = ring.map((p) => p[0]), ys = ring.map((p) => p[1]);
+    tx0 = Math.floor(Math.min(...xs) / 256); tx1 = Math.floor(Math.max(...xs) / 256);
+    ty0 = Math.floor(Math.min(...ys) / 256); ty1 = Math.floor(Math.max(...ys) / 256);
+    if ((tx1 - tx0 + 1) * (ty1 - ty0 + 1) <= TERRAIN_MAX_TILES) break;
+  }
+  const edges = ring.map((p, i) => [p, ring[(i + 1) % ring.length]]);
+  let low = null, high = null;            // [metres, global px, global py]
+  for (let ty = ty0; ty <= ty1; ty++) {
+    for (let tx = tx0; tx <= tx1; tx++) {
+      const data = await loadTerrainTile(zoom, tx, ty);
+      for (let r = 0; r < 256; r++) {
+        const gy = ty * 256 + r + 0.5;
+        const crossings = [];
+        for (const [[x0, y0], [x1, y1]] of edges) {
+          if ((y0 <= gy) !== (y1 <= gy)) crossings.push(x0 + (gy - y0) * (x1 - x0) / (y1 - y0));
+        }
+        crossings.sort((a, b) => a - b);
+        for (let k = 0; k + 1 < crossings.length; k += 2) {
+          const c0 = Math.max(Math.ceil(crossings[k] - 0.5) - tx * 256, 0);
+          const c1 = Math.min(Math.floor(crossings[k + 1] - 0.5) - tx * 256, 255);
+          for (let c = c0; c <= c1; c++) {
+            const i = (r * 256 + c) * 4;
+            const metres = data[i] * 256 + data[i + 1] + data[i + 2] / 256 - 32768;
+            if (!high || metres > high[0]) high = [metres, tx * 256 + c + 0.5, gy];
+            if (!low || metres < low[0]) low = [metres, tx * 256 + c + 0.5, gy];
+          }
+        }
+      }
+    }
+  }
+  if (!high) return null;
+  const midLat = ringLatLon.reduce((sum, p) => sum + p[0], 0) / ringLatLon.length;
+  return { min_m: low[0], max_m: high[0], min_at: terrainLatLon(low[1], low[2], zoom),
+           max_at: terrainLatLon(high[1], high[2], zoom),
+           res_m: 156543.03392 * Math.cos(midLat * Math.PI / 180) / 2 ** zoom };
+}
+
+const feet = (value) => Math.round(value).toLocaleString("en-US");
+
+function terrainLines(terrain, mslText) {
+  const lowFt = terrain.min_m * M_TO_FT, highFt = terrain.max_m * M_TO_FT;
+  const lines = [`Terrain in Survey Box: ${feet(lowFt)} to ${feet(highFt)} ft MSL ` +
+                 `(${feet(terrain.min_m)} to ${feet(terrain.max_m)} m)`];
+  const msl = parseFloat(mslText);
+  let warn = "";
+  if (!Number.isFinite(msl) || msl <= 0) {
+    lines.push("AGL: enter Survey MSL (ft) to see the height above ground");
+  } else {
+    const minAgl = msl - highFt, maxAgl = msl - lowFt;
+    lines.push(`AGL at ${feet(msl)} ft MSL: minimum ${feet(minAgl)} ft, maximum ${feet(maxAgl)} ft`);
+    if (minAgl <= 0) warn = "WARNING: TERRAIN IN THE BOX IS ABOVE THE SURVEY ALTITUDE";
+    else if (minAgl < LOW_AGL_FT) warn = `WARNING: less than ${feet(LOW_AGL_FT)} ft above the highest terrain`;
+    if (warn) lines.push(warn);
+  }
+  lines.push(`Highest ground: ${terrain.max_at[0].toFixed(4)}, ${terrain.max_at[1].toFixed(4)}   ` +
+             `Lowest: ${terrain.min_at[0].toFixed(4)}, ${terrain.min_at[1].toFixed(4)}`);
+  lines.push(`(terrain tiles, about ${Math.round(terrain.res_m)} m a pixel; obstacles such as towers and trees are not included)`);
+  return { lines, warn };
+}
+
+function showTerrain(run, note, terrain) {
+  if (run !== result) return;             // a newer plan has been generated meanwhile
+  terrainLayer.clearLayers();
+  let lines = [note], warn = "";
+  if (terrain) {
+    const msl = controls.survey_msl_ft.element.value;
+    ({ lines, warn } = terrainLines(terrain, msl));
+    for (const [at, metres, word] of [[terrain.max_at, terrain.max_m, "High"], [terrain.min_at, terrain.min_m, "Low"]]) {
+      L.circleMarker(at, { radius: 6, color: "#ffffff", weight: 1, fillColor: "#5d4037", fillOpacity: 1 })
+        .bindTooltip(`${word} ${feet(metres * M_TO_FT)} ft`, { permanent: true, direction: "bottom", offset: [0, 6], className: "wp-label terrain" })
+        .addTo(terrainLayer);
+    }
+    const mslFt = parseFloat(msl);
+    if (Number.isFinite(mslFt)) {
+      setStatus(`${run.status} AGL ${feet(mslFt - terrain.max_m * M_TO_FT)} to ${feet(mslFt - terrain.min_m * M_TO_FT)} ft.`);
+    }
+  }
+  $("summary").textContent = lines.join("\n") + "\n\n" + run.summary;
+  if (warn) showWarning([run.warning, warn].filter(Boolean).join("\n"));
+}
+
+// Called after every successful generate, for the box just drawn.
+async function refreshTerrain() {
+  const run = result, ring = run.preview.envelope, seq = ++terrainSeq;
+  const key = JSON.stringify(ring);
+  if (!ring.length) return showTerrain(run, "Terrain: n/a (no survey box)", null);
+  // Basemap None is the keep-it-private setting; terrain tiles would give the area away
+  // just as map tiles do.
+  if (!BASEMAPS[$("basemap").value]) {
+    return showTerrain(run, "Terrain and AGL: not looked up while Basemap is None", null);
+  }
+  if (terrainCache && terrainCache.key === key) return showTerrain(run, "", terrainCache.data);
+  showTerrain(run, "Terrain and AGL: looking up…", null);
+  let terrain;
+  try {
+    // The envelope closes on itself; the repeated last corner is not a separate edge.
+    terrain = await terrainExtremes(ring.slice(0, -1));
+  } catch (err) {
+    if (seq === terrainSeq) showTerrain(run, `Terrain and AGL: not available (${err.message})`, null);
+    return;
+  }
+  if (seq !== terrainSeq) return;
+  if (!terrain) return showTerrain(run, "Terrain and AGL: the survey box is too small to measure", null);
+  terrainCache = { key, data: terrain };
+  showTerrain(run, "", terrain);
+}
+
 // ---------- live overlays ----------
 // Fire hotspots (NASA FIRMS VIIRS, via the keyless copy Esri hosts) and the FAA's active
 // TFRs. Both off until ticked, both display only. Mirrors the desktop app's overlays.
@@ -541,6 +690,7 @@ function startOverlays() {
   fireRenderer = L.canvas({ pane: "fire" });
   tfrLayer = L.layerGroup().addTo(map);
   fireLayer = L.layerGroup().addTo(map);
+  terrainLayer = L.layerGroup().addTo(map);
   let timer = null;
   map.on("moveend", () => { clearTimeout(timer); timer = setTimeout(refreshFires, 400); });
 }
@@ -764,6 +914,7 @@ async function main() {
   restorePlan();
   controls.initial_heading_deg.element.addEventListener("input", () => refreshFirstLine());
   startMap();
+  setBasemap($("basemap").value);     // terrain unless the visitor chose otherwise
 
   for (const button of document.querySelectorAll(".tabs button")) {
     button.addEventListener("click", () => selectTab(button.dataset.tab));
@@ -785,11 +936,18 @@ async function main() {
     fillTable("before-table", []); fillTable("after-table", []); rememberPlan();
   });
   $("show-labels").addEventListener("change", () => { if (result) drawMap(); });
-  $("basemap").addEventListener("change", (event) => setBasemap(event.target.value));
+  $("basemap").addEventListener("change", (event) => {
+    setBasemap(event.target.value);
+    if (result) refreshTerrain();       // None stops the terrain lookup too; a map starts it
+  });
   $("toggle-qr").addEventListener("click", toggleQr);
   $("open-foreflight").addEventListener("click", openInForeFlight);
   $("show-fires").addEventListener("change", refreshFires);
   $("show-tfrs").addEventListener("change", refreshTfrs);
+  // A reload restores these checkboxes ticked without firing "change", so honour the state
+  // they are in now rather than waiting for a click.
+  refreshFires();
+  refreshTfrs();
   $("pick-center").addEventListener("click", pickCentre);
   $("pick-cancel").addEventListener("click", () => endPick("Pick cancelled."));
   document.addEventListener("keydown", (event) => {
